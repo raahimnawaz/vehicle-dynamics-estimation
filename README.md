@@ -179,3 +179,72 @@ This minimizes the difference between observed and simulated trajectories.
 ---
 
 # System Pipeline
+
+Physics Derivation
+↓
+Forward Simulation (ODE Model)
+↓
+Synthetic / Real Telemetry
+↓
+Noise Injection (Sensor Model)
+↓
+Parameter Estimation (Optimization / ML)
+↓
+Validation & Visualization
+
+
+---
+
+# Project Structure
+
+
+src/
+├── physics/ # governing equations
+├── solvers/ # Euler, RK4, ODE solvers
+├── simulation/ # forward vehicle model
+├── estimation/ # parameter fitting / optimization
+├── ml/ # regression / hybrid models
+├── visualization/ # plots and analysis
+
+
+---
+
+# Outputs
+
+The system produces:
+
+- Velocity vs time curves  
+- Stopping distance predictions  
+- Estimated physical parameters  
+- Model fit comparisons  
+- Solver accuracy benchmarks  
+
+---
+
+# Extensions
+
+Future directions:
+
+- Kalman filtering for real-time estimation  
+- Bayesian uncertainty quantification  
+- Real telemetry (OBD-II / GPS)  
+- Road condition classification (wet / dry / ice)  
+- Physics-informed neural estimation  
+
+---
+
+# Why This Project Matters
+
+This project demonstrates:
+
+- First-principles physical modeling  
+- Numerical simulation of nonlinear systems  
+- System identification and inverse modeling  
+- Integration of physics and machine learning  
+- Engineering-grade software architecture  
+
+It sits at the intersection of:
+- vehicle dynamics  
+- computational physics  
+- robotics  
+- applied machine learning  
