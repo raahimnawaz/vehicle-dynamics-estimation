@@ -91,173 +91,173 @@ Substituting:
 
 ---
 
-### Final simplified form:
+## Final Simplified Equation of Motion
 
 \[
-\frac{dv}{dt} = -\mu g - \frac{\rho C_d A}{2m} v^2
+\frac{dv}{dt}
+=
+-\mu g
+-
+\frac{\rho C_d A}{2m}v^2
 \]
+
+Where:
+
+- \( \mu \) = tire-road friction coefficient  
+- \( g \) = gravitational acceleration  
+- \( \rho \) = air density  
+- \( C_d \) = aerodynamic drag coefficient  
+- \( A \) = vehicle frontal area  
+- \( m \) = vehicle mass  
+- \( v \) = vehicle velocity  
 
 ---
 
 # Tire Slip Model (Nonlinear Extension)
 
-To capture real tire behavior, friction is modeled as a function of slip ratio.
+To capture more realistic tire behavior, friction is modeled as a nonlinear function of slip ratio.
+
+---
 
 ## Slip Ratio
 
 \[
-s = \frac{R\omega - v}{v}
+s
+=
+\frac{R\omega - v}{v}
 \]
 
 Where:
-- R = tire radius  
-- ω = wheel angular velocity  
-- v = vehicle velocity  
+
+- \( R \) = tire radius  
+- \( \omega \) = wheel angular velocity  
+- \( v \) = vehicle velocity  
 
 ---
 
-## Nonlinear Friction Model
+# Nonlinear Friction Model
 
-Instead of constant μ:
+Instead of assuming constant friction:
 
 \[
 \mu = \mu(s)
 \]
 
-A simple saturating model:
+a saturating tire model is used:
 
 \[
-\mu(s) = \mu_{\max}(1 - e^{-Cs})
+\mu(s)
+=
+\mu_{\max}(1 - e^{-Cs})
 \]
 
-This captures:
+This captures realistic tire behavior:
+
 - low slip → low friction  
 - optimal slip → peak friction  
-- high slip → saturation  
+- high slip → friction saturation  
 
 ---
 
 # Full Dynamic System
 
+Substituting the nonlinear friction model into the governing dynamics:
+
 \[
-m \frac{dv}{dt}
+m\frac{dv}{dt}
 =
 -\mu(s)mg
--\frac{1}{2}\rho C_d A v^2
+-
+\frac{1}{2}\rho C_d A v^2
 \]
 
-This nonlinear ODE is solved numerically.
+This produces a nonlinear ordinary differential equation (ODE) that is solved numerically.
 
 ---
 
 # Numerical Methods
 
-The system is solved using:
+The system is solved using multiple numerical integration techniques:
 
-- Euler integration (baseline)
-- Runge-Kutta 4th order (RK4)
-- SciPy ODE solvers (reference solution)
+- Euler Integration (baseline)
+- Runge-Kutta 4th Order (RK4)
+- SciPy ODE Solvers (reference solution)
 
-We compare:
-- stability  
-- accuracy  
-- computational cost  
+The methods are compared in terms of:
+
+- numerical stability
+- solution accuracy
+- computational cost
 
 ---
 
 # Parameter Estimation (Inverse Problem)
 
-Given observed velocity data:
+Given observed telemetry:
 
 \[
 v_{obs}(t)
 \]
 
-We estimate parameters:
+the system estimates hidden physical parameters:
 
 \[
-\theta = \{\mu, C_d, \rho, \text{slip parameters}\}
+\theta
+=
+\{
+\mu,
+C_d,
+\rho,
+\text{slip parameters}
+\}
 \]
 
 ---
 
-## Optimization Objective
+# Optimization Objective
+
+Parameter estimation is formulated as a least-squares optimization problem:
 
 \[
-\mathcal{L}(\theta) = \sum (v_{obs}(t) - v_{sim}(t, \theta))^2
+\mathcal{L}(\theta)
+=
+\sum
+(v_{obs}(t)-v_{sim}(t,\theta))^2
 \]
 
-This minimizes the difference between observed and simulated trajectories.
+This minimizes the difference between:
+
+- observed noisy telemetry
+- simulated vehicle dynamics
 
 ---
 
 # System Pipeline
 
+```text
 Physics Derivation
-↓
+        ↓
 Forward Simulation (ODE Model)
-↓
+        ↓
 Synthetic / Real Telemetry
-↓
+        ↓
 Noise Injection (Sensor Model)
-↓
+        ↓
 Parameter Estimation (Optimization / ML)
-↓
+        ↓
 Validation & Visualization
-
+```
 
 ---
 
 # Project Structure
 
-
+```text
 src/
-├── physics/ # governing equations
-├── solvers/ # Euler, RK4, ODE solvers
-├── simulation/ # forward vehicle model
-├── estimation/ # parameter fitting / optimization
-├── ml/ # regression / hybrid models
-├── visualization/ # plots and analysis
-
-
----
-
-# Outputs
-
-The system produces:
-
-- Velocity vs time curves  
-- Stopping distance predictions  
-- Estimated physical parameters  
-- Model fit comparisons  
-- Solver accuracy benchmarks  
-
----
-
-# Extensions
-
-Future directions:
-
-- Kalman filtering for real-time estimation  
-- Bayesian uncertainty quantification  
-- Real telemetry (OBD-II / GPS)  
-- Road condition classification (wet / dry / ice)  
-- Physics-informed neural estimation  
-
----
-
-# Why This Project Matters
-
-This project demonstrates:
-
-- First-principles physical modeling  
-- Numerical simulation of nonlinear systems  
-- System identification and inverse modeling  
-- Integration of physics and machine learning  
-- Engineering-grade software architecture  
-
-It sits at the intersection of:
-- vehicle dynamics  
-- computational physics  
-- robotics  
-- applied machine learning  
+├── physics/        # governing equations
+├── solvers/        # Euler, RK4, ODE solvers
+├── simulation/     # forward vehicle model
+├── estimation/     # parameter fitting / optimization
+├── ml/             # regression / hybrid models
+├── visualization/  # plots and analysis
+```
