@@ -54,7 +54,7 @@ def generate_training_data(num_samples, window_size, dt=0.01):
 
 def train_model():
     window_size = 50 
-    epochs = 1500
+    epochs = 2500
     
     if torch.cuda.is_available():
         device = torch.device("cuda")
