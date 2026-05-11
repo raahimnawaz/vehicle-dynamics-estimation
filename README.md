@@ -20,6 +20,19 @@ This system models how a vehicle slows down under braking and aerodynamic drag, 
 - Air density (ρ)
 - Tire slip response parameters
 
+## System Identification Results
+
+| Method | μ Estimate | Error | Characteristics |
+|--------|------------|-------|-----------------|
+| True | 0.7000 | — | Ground truth |
+| SciPy Batch | 0.6988 | 0.17% | Offline optimal |
+| EKF | 0.6756 | 3.5% | Real-time |
+| Neural Net | 0.6854 | 2.1% | Fast inference |
+
+# Estimation Results
+
+![Vehicle Dynamics Estimation](figures/estimation_results.png)
+
 The project is structured as:
 
 > **Forward Model (Physics Simulation) → Data → Inverse Model (Parameter Estimation)**
