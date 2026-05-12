@@ -22,7 +22,9 @@ import torch
 from src.data.telemetry import extract_braking_event, load_csv, resample_uniform
 from src.estimation.kalman import VehicleEKF
 from src.estimation.optimize import estimate
+from src.ml.pinn import evaluate_curve, generate_dataset, train_pinn
 from src.ml.train import FrictionNet
+from src.physics.wheel import mu_pacejka
 from src.scenarios.adversarial import biased_sensor, clean_sensor, dropout_sensor, mu_step
 from src.scenarios.runner import run_scenario
 from src.simulation.realism import add_noise
@@ -205,10 +207,67 @@ def run_adversarial() -> None:
     print(f"  wrote = {out}")
 
 
+def run_pinn(seed: int = 0, epochs: int = 4000) -> None:
+    """Train the PINN to recover mu(s) from noisy braking trajectories."""
+    ds, meta = generate_dataset(n_runs=8, t_final=4.0, seed=seed)
+    print("=== PINN: discovering mu(s) ===")
+    print(f"  ground truth   = mu_max=(1 - e^(-Cs)) with mu_max={meta['mu_max']}, C={meta['C']}")
+    print(f"  samples        = {meta['n_samples']}   slip range s in {meta['s_range']}")
+
+    net, history = train_pinn(ds, epochs=epochs, seed=seed)
+    s, mu_hat = evaluate_curve(net, s_max=0.3)
+    mu_truth = mu_pacejka(s, meta["mu_max"], meta["C"])
+    in_range = (s >= meta["s_range"][0]) & (s <= meta["s_range"][1])
+    max_err = float(np.max(np.abs(mu_hat[in_range] - mu_truth[in_range])))
+    mean_err = float(np.mean(np.abs(mu_hat[in_range] - mu_truth[in_range])))
+
+    os.makedirs(RESULTS, exist_ok=True)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    plt.style.use("dark_background")
+    fig.patch.set_facecolor("#0b0b0b")
+    for ax in (ax1, ax2):
+        ax.set_facecolor("#0b0b0b")
+        ax.grid(alpha=0.2)
+
+    # left: recovered curve vs truth + data scatter
+    ax1.plot(s, mu_truth, color="#FFD166", linewidth=2.5, linestyle="--", label="Ground truth μ(s)")
+    ax1.plot(s, mu_hat, color="#00FF85", linewidth=2.5, label="PINN μ_θ(s)")
+    # implied (s, mu) pairs from data via inverse of dv equation
+    mu_implied = (-ds.dv_dt - (0.4 / 1500.0) * ds.v ** 2) / 9.81
+    ax1.scatter(ds.s, mu_implied, s=4, color="#FF3B3B", alpha=0.18, label="Data (implied)")
+    ax1.set_xlim(0, 0.3)
+    ax1.set_ylim(-0.1, 1.1)
+    ax1.set_xlabel("slip ratio s")
+    ax1.set_ylabel("μ")
+    ax1.set_title("Recovered tire curve")
+    ax1.legend(facecolor="#111", edgecolor="white", fontsize=9, loc="lower right")
+
+    # right: training loss
+    ax2.plot(np.arange(len(history)) * 200, history, color="#00E5FF", linewidth=2)
+    ax2.set_yscale("log")
+    ax2.set_xlabel("epoch")
+    ax2.set_ylabel("loss (ODE residual + monotonicity)")
+    ax2.set_title("Training")
+
+    plt.tight_layout()
+    out = os.path.join(RESULTS, "pinn_recovery.png")
+    plt.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"  max  |d_mu| (in-range) = {max_err:.3f}")
+    print(f"  mean |d_mu| (in-range) = {mean_err:.3f}")
+    print(f"  wrote = {out}")
+
+    # Save weights so the C++ port has a fixed reference to load.
+    os.makedirs("models", exist_ok=True)
+    torch.save(net.state_dict(), os.path.join("models", "pinn_mu.pth"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--real", action="store_true", help="run real-telemetry pipeline")
     ap.add_argument("--adversarial", action="store_true", help="run adversarial EKF scenarios")
+    ap.add_argument("--pinn", action="store_true", help="train the PINN that recovers mu(s)")
     ap.add_argument("--synthetic-only", action="store_true")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--csv", default="data/sample_braking.csv")
@@ -223,6 +282,8 @@ def main() -> None:
         run_real(args.csv)
     if args.adversarial or args.all:
         run_adversarial()
+    if args.pinn or args.all:
+        run_pinn()
 
 
 if __name__ == "__main__":
