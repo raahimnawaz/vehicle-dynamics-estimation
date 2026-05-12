@@ -37,7 +37,6 @@ def generate_training_data(num_samples, window_size, dt=0.01):
         history = []
         
         for _ in range(window_size):
-            # Add sensor noise immediately
             noise = np.random.normal(0, 0.5)
             history.append(v + noise)
             

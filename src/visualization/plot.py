@@ -1,3 +1,4 @@
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -5,6 +6,8 @@ def plot(t, v_true, v_obs=None, v_fit=None):
 
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(10, 5))
+    import os
+    os.makedirs("figures", exist_ok=True)
 
     valid = v_true > 0.05
 
@@ -54,4 +57,7 @@ def plot(t, v_true, v_obs=None, v_fit=None):
 
     plt.tight_layout()
     plt.savefig("figures/estimation_results.png", dpi=300, bbox_inches="tight")
-    plt.show()
+    if matplotlib.get_backend().lower() not in ("agg", "pdf", "svg", "ps"):
+        plt.show()
+    else:
+        plt.close(fig)
