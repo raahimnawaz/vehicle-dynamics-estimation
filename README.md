@@ -1,26 +1,33 @@
 # Vehicle Dynamics & Physics-Informed Parameter Estimation
 
-A computational framework for modeling vehicle longitudinal braking dynamics using first-principles physics, numerical simulation, and inverse parameter estimation.
+[![CI](https://github.com/raahimnawaz/vehicle-dynamics-ml-/actions/workflows/ci.yml/badge.svg)](https://github.com/raahimnawaz/vehicle-dynamics-ml-/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-The project bridges:
-- Classical mechanics  
-- Nonlinear differential equations  
-- Numerical ODE solvers  
-- Tire slip modeling  
-- Physics-informed parameter estimation  
+A computational framework for modeling vehicle longitudinal braking dynamics from first principles, simulating them with explicit ODE solvers, and recovering the underlying physical parameters from noisy telemetry. Three estimators are compared on the same data: a SciPy batch optimizer, an Extended Kalman Filter for online estimation, and a small MLP trained on synthetic rollouts.
+
+The project sits at the intersection of vehicle dynamics, computational physics, and system identification, and is structured to scale toward real-data and PINN/edge-inference extensions.
 
 ---
 
-# Overview
+## Quickstart
 
-This system models how a vehicle slows down under braking and aerodynamic drag, then uses observed motion data to estimate hidden physical parameters such as:
+```bash
+git clone https://github.com/raahimnawaz/vehicle-dynamics-ml-
+cd tester
+python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+python reproduce.py                                # regenerates every figure in results/
+pytest                                             # runs the test suite
+```
 
-- Tire-road friction coefficient (μ)
-- Aerodynamic drag coefficient (Cd)
-- Air density (ρ)
-- Tire slip response parameters
+`reproduce.py` runs the full pipeline end-to-end (synthetic + real-telemetry-shaped CSV) and writes every figure shown below to `results/`.
 
-## System Identification Results
+---
+
+## Results
+
+### Synthetic benchmark
 
 | Method | μ Estimate | Error | Characteristics |
 |--------|------------|-------|-----------------|
@@ -29,235 +36,149 @@ This system models how a vehicle slows down under braking and aerodynamic drag, 
 | EKF | 0.6756 | 3.5% | Real-time |
 | Neural Net | 0.6854 | 2.1% | Fast inference |
 
-# Estimation Results
-
 ![Vehicle Dynamics Estimation](figures/estimation_results.png)
 
-The project is structured as:
+### Real telemetry (Option A)
 
-> **Forward Model (Physics Simulation) → Data → Inverse Model (Parameter Estimation)**
+A loader in `src/data/telemetry.py` ingests CSV logs of the form `time,speed` (units: seconds, m/s — the format produced by most OBD-II / GPS pipelines and by [comma2k19](https://github.com/commaai/comma2k19) after a one-line conversion). A representative braking clip is shipped in `data/sample_braking.csv` so the demo is fully reproducible offline; `python reproduce.py --real` runs the SciPy and EKF estimators against it and writes `results/real_estimation.png`.
 
----
+### Adversarial EKF scenarios (Option D)
 
-# Physical Derivation (First Principles)
+![Adversarial EKF](results/adversarial_ekf.png)
 
-## 1. Newton’s Second Law
+The same EKF, stressed three ways. Each panel pair shows the velocity track (true vs. measurements, with dropouts shown as gaps) and the corresponding $\mu$ estimate with $\pm 2\sigma$ covariance bounds:
 
-We begin with:
+| Scenario | Final-window error in $\mu$ | What it shows |
+|---|---|---|
+| **Mid-run road change** (dry $\mu=0.8 \to$ wet $\mu=0.35$ at $t=2$ s) | 0.04 | Process noise on $\mu$ tuned to chase abrupt transitions. |
+| **Sensor dropout bursts** (50% rate, 60-sample bursts) | 0.001 | Covariance grows during blackout, collapses on reacquire. |
+| **Biased sensor** (+1.5 m/s constant offset) | 0.06 | Predictable bias-induced bias in $\mu$ — bounds the practical risk of a miscalibrated wheel-speed. |
 
-**F = ma**
-
-For longitudinal vehicle motion:
-
-**m dv/dt = ΣF**
-
----
-
-## 2. Forces Acting on the Vehicle
-
-### (a) Tire Friction Force
-
-Normal force:
-
-**N = mg**
-
-Friction force:
-
-**F_f = μN = μmg**
+Tuning knob: `q_mu` in `src/scenarios/runner.py` (process noise on $\mu$). The step-change panel uses `q_mu=1e-2`; the steady-state benchmark uses `1e-4`. This is the kind of trade-off you'd reach for first when porting the filter to a real ECU.
 
 ---
 
-### (b) Aerodynamic Drag
+## Physical Derivation
 
-**F_d = (1/2) ρ C_d A v²**
+### Tire friction force
 
-Where:
-- ρ = air density  
-- C_d = drag coefficient  
-- A = frontal area  
-- v = velocity  
+Normal force: $N = mg$. Friction force:
 
----
+$$F_f = \mu N = \mu m g$$
 
-## 3. Governing Equation of Motion
+### Aerodynamic drag
 
-Summing forces:
+$$F_d = \tfrac{1}{2}\,\rho\,C_d\,A\,v^2$$
 
-**m dv/dt = -F_f - F_d**
+where $\rho$ is air density, $C_d$ the drag coefficient, $A$ the frontal area, and $v$ the vehicle velocity.
 
-Substituting:
+### Governing equation of motion
 
-**m dv/dt = -μmg - (1/2) ρ C_d A v²**
+Summing forces on the vehicle:
 
----
+$$m\frac{dv}{dt} = -F_f - F_d = -\mu m g - \tfrac{1}{2}\rho C_d A v^2$$
 
-### Final simplified form:
+which simplifies to
 
-\[
-\frac{dv}{dt} = -\mu g - \frac{\rho C_d A}{2m} v^2
-\]
+$$\frac{dv}{dt} = -\mu g - \frac{\rho C_d A}{2m}\,v^2.$$
 
 ---
 
-# Tire Slip Model (Nonlinear Extension)
+## Tire Slip Model (Nonlinear Extension)
 
-To capture real tire behavior, friction is modeled as a function of slip ratio.
+Real tires don't have a constant friction coefficient — friction depends on the slip ratio between wheel and ground:
 
-## Slip Ratio
+$$s = \frac{R\omega - v}{v}$$
 
-\[
-s = \frac{R\omega - v}{v}
-\]
+with $R$ the tire radius and $\omega$ the wheel angular velocity. A simple saturating model captures the low-slip / peak / saturation regimes:
 
-Where:
-- R = tire radius  
-- ω = wheel angular velocity  
-- v = vehicle velocity  
+$$\mu(s) = \mu_{\max}\,\bigl(1 - e^{-Cs}\bigr).$$
 
----
+Plugging this back into the force balance yields the full nonlinear ODE that is solved numerically:
 
-## Nonlinear Friction Model
-
-Instead of constant μ:
-
-\[
-\mu = \mu(s)
-\]
-
-A simple saturating model:
-
-\[
-\mu(s) = \mu_{\max}(1 - e^{-Cs})
-\]
-
-This captures:
-- low slip → low friction  
-- optimal slip → peak friction  
-- high slip → saturation  
+$$m\frac{dv}{dt} = -\mu(s)\,m g - \tfrac{1}{2}\,\rho C_d A\,v^2.$$
 
 ---
 
-# Full Dynamic System
+## Numerical Methods
 
-\[
-m \frac{dv}{dt}
-=
--\mu(s)mg
--\frac{1}{2}\rho C_d A v^2
-\]
-
-This nonlinear ODE is solved numerically.
-
----
-
-# Numerical Methods
-
-The system is solved using:
+The forward model is solved with:
 
 - Euler integration (baseline)
-- Runge-Kutta 4th order (RK4)
-- SciPy ODE solvers (reference solution)
+- Runge-Kutta 4th order (RK4) — default
+- SciPy ODE solvers (reference)
 
-We compare:
-- stability  
-- accuracy  
-- computational cost  
+The test suite verifies that RK4 converges at 4th order on a known closed-form solution (`tests/test_rk4.py`).
 
 ---
 
-# Parameter Estimation (Inverse Problem)
+## Parameter Estimation (Inverse Problem)
 
-Given observed velocity data:
+Given an observed velocity trace $v_{\mathrm{obs}}(t)$, we recover
 
-\[
-v_{obs}(t)
-\]
+$$\theta = \{\mu,\ C_d,\ \rho,\ \text{slip parameters}\}$$
 
-We estimate parameters:
+by minimising the trajectory mismatch
 
-\[
-\theta = \{\mu, C_d, \rho, \text{slip parameters}\}
-\]
+$$\mathcal{L}(\theta) = \sum_t \bigl(v_{\mathrm{obs}}(t) - v_{\mathrm{sim}}(t,\theta)\bigr)^2.$$
 
----
+Three estimators implement this:
 
-## Optimization Objective
-
-\[
-\mathcal{L}(\theta) = \sum (v_{obs}(t) - v_{sim}(t, \theta))^2
-\]
-
-This minimizes the difference between observed and simulated trajectories.
+- **SciPy batch** (`src/estimation/optimize.py`) — Nelder-Mead on the full trajectory.
+- **EKF** (`src/estimation/kalman.py`) — joint state/parameter filter, $x = [v,\mu]^\top$.
+- **FrictionNet** (`src/ml/train.py`) — MLP mapping a 50-sample velocity window to $\mu$.
 
 ---
 
-# System Pipeline
+## Pipeline
 
-Physics Derivation
-↓
-Forward Simulation (ODE Model)
-↓
-Synthetic / Real Telemetry
-↓
-Noise Injection (Sensor Model)
-↓
-Parameter Estimation (Optimization / ML)
-↓
-Validation & Visualization
-
+```text
+Physics derivation
+        ↓
+Forward simulation (RK4 ODE)
+        ↓
+Synthetic / real telemetry
+        ↓
+Sensor noise model
+        ↓
+Estimation (batch / EKF / NN)
+        ↓
+Validation & visualisation
+```
 
 ---
 
-# Project Structure
+## Project Structure
 
-
+```text
 src/
-├── physics/ # governing equations
-├── solvers/ # Euler, RK4, ODE solvers
-├── simulation/ # forward vehicle model
-├── estimation/ # parameter fitting / optimization
-├── ml/ # regression / hybrid models
-├── visualization/ # plots and analysis
-
-
----
-
-# Outputs
-
-The system produces:
-
-- Velocity vs time curves  
-- Stopping distance predictions  
-- Estimated physical parameters  
-- Model fit comparisons  
-- Solver accuracy benchmarks  
+├── physics/        # governing equations
+├── solvers/        # Euler, RK4, SciPy wrappers
+├── simulation/     # forward vehicle model + sensor model
+├── data/           # real-telemetry CSV loader
+├── estimation/     # batch optimiser + EKF
+├── ml/             # FrictionNet (PyTorch MLP)
+├── scenarios/      # adversarial scenarios + runner
+└── visualization/  # plotting
+tests/              # pytest suite
+data/               # sample telemetry CSV
+results/            # generated figures (regenerated by reproduce.py)
+```
 
 ---
 
-# Extensions
+## Roadmap
 
-Future directions:
-
-- Kalman filtering for real-time estimation  
-- Bayesian uncertainty quantification  
-- Real telemetry (OBD-II / GPS)  
-- Road condition classification (wet / dry / ice)  
-- Physics-informed neural estimation  
+- [x] First-principles forward model + RK4 solver
+- [x] Batch / EKF / NN estimators on synthetic data
+- [x] Real-telemetry CSV loader + reproducible pipeline (Option A)
+- [x] Adversarial / edge-case EKF: mid-run $\mu$ change, dropouts, biased sensor (Option D)
+- [ ] Model-mismatch study: slip-model data → simple-friction fit (Option B)
+- [ ] PINN inverse solver discovering $\mu(s)$ (Option C)
+- [ ] C++ port of EKF + PINN for edge inference
 
 ---
 
-# Why This Project Matters
+## License
 
-This project demonstrates:
-
-- First-principles physical modeling  
-- Numerical simulation of nonlinear systems  
-- System identification and inverse modeling  
-- Integration of physics and machine learning  
-- Engineering-grade software architecture  
-
-It sits at the intersection of:
-- vehicle dynamics  
-- computational physics  
-- robotics  
-- applied machine learning  
+Apache 2.0 — see [LICENSE](LICENSE).

@@ -21,3 +21,5 @@ dist/
 
 
 *.log
+
+.pytest_cache/
