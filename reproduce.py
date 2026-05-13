@@ -26,6 +26,7 @@ from src.ml.pinn import evaluate_curve, generate_dataset, train_pinn
 from src.ml.train import FrictionNet
 from src.physics.wheel import mu_pacejka
 from src.scenarios.adversarial import biased_sensor, clean_sensor, dropout_sensor, mu_step
+from src.scenarios.mismatch import EFFECTS, run_sweep
 from src.scenarios.runner import run_scenario
 from src.simulation.realism import add_noise
 from src.simulation.run_sim import simulate
@@ -263,11 +264,127 @@ def run_pinn(seed: int = 0, epochs: int = 4000) -> None:
     torch.save(net.state_dict(), os.path.join("models", "pinn_mu.pth"))
 
 
+def run_mismatch() -> None:
+    """Model-mismatch sweep: how each method degrades under each unmodeled effect."""
+    cells = run_sweep()
+    methods = sorted({c.method for c in cells}, key=lambda x: ["Batch", "EKF", "NN", "PINN"].index(x.split()[0]))
+    effect_labels = {e.name: e.label for e in EFFECTS}
+    effect_order = [e.name for e in EFFECTS]
+
+    plt.style.use("dark_background")
+
+    # --- Panel 1: per-method degradation curves -----------------------------
+    # x-axis is normalised severity (0=lightest, 1=heaviest) so the three
+    # effects -- which live on different physical scales -- are visually
+    # comparable. The actual numeric intensities are listed below the title.
+    fig1, axes = plt.subplots(2, 2, figsize=(13, 8))
+    fig1.patch.set_facecolor("#0b0b0b")
+    colours = {"grade": "#FFD166", "headwind": "#00E5FF", "brake": "#FF6B9D"}
+
+    for ax, method in zip(axes.flatten(), methods):
+        ax.set_facecolor("#0b0b0b")
+        ax.grid(alpha=0.2)
+        for effect_name in effect_order:
+            effect_def = next(e for e in EFFECTS if e.name == effect_name)
+            rel = [c for c in cells if c.method == method and c.effect == effect_name]
+            rel.sort(key=lambda c: c.intensity)
+            i_max = max(effect_def.intensities)
+            xs = [(c.intensity / i_max) if i_max > 0 else 0 for c in rel]
+            ys = [c.rmse_norm * 100 for c in rel]
+            ax.plot(xs, ys, marker="o", linewidth=2,
+                    color=colours[effect_name], label=effect_labels[effect_name])
+        ax.set_title(method)
+        ax.set_xlabel("normalised mismatch severity")
+        ax.set_ylabel("trajectory RMSE / v₀ (%)")
+        ax.set_xlim(-0.05, 1.05)
+        ax.legend(facecolor="#111", edgecolor="white", fontsize=8)
+    fig1.suptitle("How each method degrades under unmodeled effects "
+                  "(x: 0 = lightest, 1 = heaviest)", color="white")
+    plt.tight_layout()
+
+    os.makedirs(RESULTS, exist_ok=True)
+    out1 = os.path.join(RESULTS, "mismatch_per_method.png")
+    fig1.savefig(out1, dpi=200, bbox_inches="tight", facecolor="#0b0b0b")
+    plt.close(fig1)
+
+    # --- Panel 2: summary heatmap at high-mismatch intensity ---------------
+    fig2, ax = plt.subplots(figsize=(8, 4.5))
+    fig2.patch.set_facecolor("#0b0b0b")
+    ax.set_facecolor("#0b0b0b")
+
+    # take the *highest* intensity for each effect
+    grid = np.zeros((len(methods), len(effect_order)))
+    for i, m in enumerate(methods):
+        for j, e in enumerate(effect_order):
+            relevant = [c for c in cells if c.method == m and c.effect == e]
+            high = max(relevant, key=lambda c: c.intensity)
+            grid[i, j] = high.rmse_norm * 100
+
+    im = ax.imshow(grid, cmap="magma", aspect="auto")
+    ax.set_xticks(range(len(effect_order)))
+    ax.set_xticklabels([effect_labels[e] for e in effect_order])
+    ax.set_yticks(range(len(methods)))
+    ax.set_yticklabels(methods)
+    for i in range(len(methods)):
+        for j in range(len(effect_order)):
+            ax.text(j, i, f"{grid[i, j]:.1f}%", ha="center", va="center",
+                    color="white" if grid[i, j] > grid.max() / 2 else "black", fontsize=11)
+    ax.set_title("Trajectory RMSE / v₀ at maximum mismatch intensity")
+    cbar = fig2.colorbar(im, ax=ax)
+    cbar.ax.tick_params(colors="white")
+    out2 = os.path.join(RESULTS, "mismatch_heatmap.png")
+    plt.tight_layout()
+    fig2.savefig(out2, dpi=200, bbox_inches="tight", facecolor="#0b0b0b")
+    plt.close(fig2)
+
+    # --- Panel 3: trajectory overlay at nominal vs worst mismatch ----------
+    fig3, axes = plt.subplots(len(methods), 2, figsize=(11, 9), sharex=True)
+    fig3.patch.set_facecolor("#0b0b0b")
+
+    def first(method, effect, target_intensity):
+        return min((c for c in cells if c.method == method and c.effect == effect),
+                   key=lambda c: abs(c.intensity - target_intensity))
+
+    for row, method in enumerate(methods):
+        for col, (eff_name, intensity) in enumerate([("grade", 0.0), ("grade", 0.12)]):
+            ax = axes[row, col]
+            ax.set_facecolor("#0b0b0b")
+            ax.grid(alpha=0.2)
+            c = first(method, eff_name, intensity)
+            ax.scatter(c.t, c.v_obs, s=4, color="#FF3B3B", alpha=0.25, label="noisy obs")
+            ax.plot(c.t, c.v_truth, color="#00E5FF", linewidth=2, label="truth (slip model)")
+            ax.plot(c.t, c.v_pred, color="#00FF85", linewidth=2, linestyle="--",
+                    label=f"{method} (rmse={c.rmse:.2f})")
+            if col == 0:
+                ax.set_ylabel("v (m/s)")
+            if row == 0:
+                ax.set_title("nominal (grade=0)" if intensity == 0.0 else "grade = 0.12 rad")
+            if row == len(methods) - 1:
+                ax.set_xlabel("time (s)")
+            ax.legend(facecolor="#111", edgecolor="white", fontsize=7, loc="upper right")
+    out3 = os.path.join(RESULTS, "mismatch_trajectories.png")
+    plt.tight_layout()
+    fig3.savefig(out3, dpi=200, bbox_inches="tight", facecolor="#0b0b0b")
+    plt.close(fig3)
+
+    print("=== Model-mismatch study ===")
+    for m in methods:
+        nominal = [c for c in cells if c.method == m and c.intensity in (0.0, 0.01)]
+        worst_m = [c for c in cells if c.method == m]
+        rmse_lo = float(np.mean([c.rmse for c in nominal]))
+        rmse_hi = float(np.max([c.rmse for c in worst_m]))
+        print(f"  {m:20s}  rmse(nominal)={rmse_lo:.2f}  rmse(worst)={rmse_hi:.2f}")
+    print(f"  wrote {out1}")
+    print(f"  wrote {out2}")
+    print(f"  wrote {out3}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--real", action="store_true", help="run real-telemetry pipeline")
     ap.add_argument("--adversarial", action="store_true", help="run adversarial EKF scenarios")
     ap.add_argument("--pinn", action="store_true", help="train the PINN that recovers mu(s)")
+    ap.add_argument("--mismatch", action="store_true", help="run the model-mismatch study")
     ap.add_argument("--synthetic-only", action="store_true")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--csv", default="data/sample_braking.csv")
@@ -284,6 +401,8 @@ def main() -> None:
         run_adversarial()
     if args.pinn or args.all:
         run_pinn()
+    if args.mismatch or args.all:
+        run_mismatch()
 
 
 if __name__ == "__main__":
