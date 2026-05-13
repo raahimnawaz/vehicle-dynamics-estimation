@@ -1,0 +1,39 @@
+{
+  "host": {
+    "os": "Windows",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "python": "3.11.9"
+  },
+  "compiler": "g++ 15.1.0 (MSYS2 UCRT64)",
+  "flags": "-std=c++17 -O3 -ffast-math -funroll-loops -DNDEBUG",
+  "iterations": 50000,
+  "batch": 200,
+  "results": {
+    "ekf_step_ns": {
+      "median": 10,
+      "p99": 13,
+      "min": 10,
+      "throughput_mops": 100.0
+    },
+    "pinn_forward_ns": {
+      "median": 689,
+      "p99": 1277,
+      "min": 680,
+      "throughput_mops": 1.45
+    }
+  },
+  "binary_sizes_bytes_stripped": {
+    "bench": 61952,
+    "parity": 80384
+  },
+  "parity_max_abs_diff_vs_python": {
+    "ekf_v": 6.746e-09,
+    "ekf_mu": 2.291e-09,
+    "ekf_sigma_v": 4.998e-11,
+    "ekf_sigma_mu": 3.106e-10,
+    "pinn_mu": 2.349e-07,
+    "pinn_mu_note": "Python net uses float32; C++ uses float64. Difference is limited by float32 quantisation of the weights, not algorithmic drift."
+  },
+  "date": "2026-05-12"
+}

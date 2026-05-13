@@ -23,3 +23,5 @@ dist/
 *.log
 
 .pytest_cache/
+
+cpp/build/
