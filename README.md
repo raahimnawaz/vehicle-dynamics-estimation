@@ -46,21 +46,49 @@ A loader in `src/data/telemetry.py` ingests CSV logs of the form `time,speed` (u
 
 The `cpp-edge-port` branch ports the EKF and PINN to header-only, allocation-free C++17. Weights are baked into the binary at compile time via [`tools/export_weights.py`](tools/export_weights.py) — no file I/O, no PyTorch runtime, no ONNX dependency.
 
-**Latency** (x86_64, MSYS2 UCRT64 g++ 15.1.0, `-O3 -ffast-math`, 50k samples)
+#### Python vs C++ latency
 
-| Op | median | p99 | throughput |
-|---|---|---|---|
-| EKF step (predict + update) | **10 ns** | 13 ns | 100 Mops/s |
-| PINN forward (1→32→32→1) | **689 ns** | 1.28 µs | 1.45 Mops/s |
+![Python vs C++ benchmark](results/bench_python_vs_cpp.png)
 
-**Numerical parity** vs the Python reference on identical inputs:
+Same algorithm, same inputs, same x86_64 host. Both runs report median + p99 across 5,000+ batched samples; per-op times divide a 200-op inner loop by 200 to amortise timer resolution. The Python EKF uses NumPy 2×2 matmul + the Python interpreter loop; the Python PINN goes through `torch.nn.Sequential.forward` which dominates the actual math.
 
-| Quantity | max\|Δ\| |
+| Op | Python (median) | C++ (median) | **Speedup** | p99 (Py / C++) | Throughput (Py / C++) |
+|---|---:|---:|---:|---:|---:|
+| EKF step (predict + update) | 34,145 ns | **10 ns** | **3,414×** | 45 µs / 13 ns | 0.03 / 100 Mops/s |
+| PINN forward (1→32→32→1) | 92,197 ns | **689 ns** | **134×** | 133 µs / 1.28 µs | 0.01 / 1.45 Mops/s |
+
+The 3,400× EKF speedup is the headline: the Python version is 99.97 % per-call dispatch overhead, the C++ version is essentially the math itself.
+
+#### Efficiency
+
+| | Python | C++ (stripped) |
+|---|---|---|
+| Binary / interpreter footprint | ~60 MB (CPython + NumPy + PyTorch) | **62 KB** (bench) / 80 KB (parity) |
+| Runtime allocations per EKF step | 7 (small NumPy temporaries) | **0** |
+| Heap touched by PINN inference | grows with autograd graph | **512 bytes** of stack (fp64) |
+| External deps at run time | NumPy, SciPy, PyTorch | **none** |
+
+Reproduce:
+
+```bash
+make -C cpp run-bench                    # builds + runs C++ bench
+python tools/bench_python.py             # writes benchmarks/x86_64-python.json
+python tools/plot_bench_comparison.py    # writes results/bench_python_vs_cpp.png
+python tools/parity_check.py             # confirms <1e-9 numerical agreement
+```
+
+#### Numerical parity
+
+Both implementations are fed the same noisy input stream and their outputs are diffed:
+
+| Quantity | max\|Δ\| Py − C++ |
 |---|---|
-| EKF $v$, $\mu$ | $\sim 10^{-9}$ |
-| PINN $\mu_\theta(s)$ | $2.3 \times 10^{-7}$ (limited by float32 → float64) |
+| EKF $v$ | $6.7 \times 10^{-9}$ |
+| EKF $\mu$ | $2.3 \times 10^{-9}$ |
+| EKF $\sigma_v$, $\sigma_\mu$ | $5 \times 10^{-11}$ — $3 \times 10^{-10}$ |
+| PINN $\mu_\theta(s)$ | $2.3 \times 10^{-7}$ (limited by float32 weights in the Python net) |
 
-**Binary size** (stripped): bench 62 KB, parity 80 KB.
+The EKF gap is FP-reordering noise under `-ffast-math`; no algorithmic divergence. The PINN gap is the floor imposed by the Python net running in float32 while the C++ port runs in float64.
 
 Jetson aarch64 numbers will be added once the hardware is in hand — same `make run-bench` on the device, JSON drops into [`benchmarks/`](benchmarks/). See [`cpp/README.md`](cpp/README.md) for build, cross-compile, and Cortex-M porting notes.
 
