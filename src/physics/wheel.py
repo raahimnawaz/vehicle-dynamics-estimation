@@ -86,7 +86,14 @@ def dvdt(v: float, s: float, mu_fn: Callable[[float], float], p=DEFAULTS) -> flo
 
 def simulate(v0: float, t: np.ndarray, s_schedule: Callable[[float], float],
              mu_fn: Callable[[float], float], p=DEFAULTS) -> np.ndarray:
-    """Fixed-step RK4 over uniform `t`."""
+    """Fixed-step RK4 over uniform `t`.
+
+    Implements RK4 inline (rather than reusing `src/solvers/rk4.py::rk4_step`)
+    because the right-hand side here depends on a time-varying slip schedule
+    `s_schedule(ti)`. Each RK4 stage must sample the schedule at the correct
+    sub-step time (t, t+dt/2, t+dt); the generic autonomous helper would only
+    sample at the step start and silently drop to 1st-order accuracy.
+    """
     dt = float(t[1] - t[0])
     v = np.zeros_like(t)
     v[0] = v0

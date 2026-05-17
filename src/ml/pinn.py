@@ -356,7 +356,9 @@ def train_pinn(ds: Dataset, *, epochs: int = 4000, lr: float = 5e-3,
             history.append(float(loss.item()))
             if verbose:
                 print(f"  epoch {epoch:4d}  total={loss.item():.4f}  "
-                      f"data={parts['data']:.4f}  smooth={parts['smooth']:.4f}")
+                      f"data={parts['data']:.4f}  "
+                      f"concave={parts['concave']:.4f}  "
+                      f"zero={parts['zero']:.4f}")
     return net, history
 
 
@@ -376,7 +378,8 @@ def train_pinn_2d(ds: BrakeDataset, *, epochs: int = 5000, lr: float = 5e-3,
             history.append(float(loss.item()))
             if verbose:
                 print(f"  epoch {epoch:4d}  total={loss.item():.4f}  "
-                      f"data={parts['data']:.4f}  smooth={parts['smooth']:.4f}  "
+                      f"data={parts['data']:.4f}  "
+                      f"concave={parts['concave']:.4f}  "
                       f"mono={parts['mono']:.4f}  pin={parts['pin']:.4f}")
     return net, history
 
