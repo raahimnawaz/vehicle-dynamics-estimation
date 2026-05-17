@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [cpp-edge-port, main, master]
   pull_request:
-    branches: [main, master]
+    branches: [cpp-edge-port, main, master]
 
 jobs:
   test:
