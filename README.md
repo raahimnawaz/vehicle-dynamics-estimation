@@ -1,6 +1,6 @@
 # Vehicle Dynamics & Physics-Informed Parameter Estimation
 
-[![CI](https://github.com/raahimnawaz/vehicle-dynamics-ml-/actions/workflows/ci.yml/badge.svg)](https://github.com/raahimnawaz/vehicle-dynamics-ml-/actions/workflows/ci.yml)
+[![CI](https://github.com/raahimnawaz/vehicle-dynamics-estimation/actions/workflows/ci.yml/badge.svg)](https://github.com/raahimnawaz/vehicle-dynamics-estimation/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
@@ -13,8 +13,8 @@ The repo is structured to make every claim verifiable — `python reproduce.py -
 ## Quickstart
 
 ```bash
-git clone https://github.com/raahimnawaz/vehicle-dynamics-ml-
-cd tester
+git clone https://github.com/raahimnawaz/vehicle-dynamics-estimation
+cd vehicle-dynamics-estimation
 python -m venv venv && venv\Scripts\activate          # Windows; source venv/bin/activate on POSIX
 pip install -r requirements.txt
 python reproduce.py --all                              # regenerates every figure below
@@ -174,7 +174,7 @@ Tuning knob: `q_mu` in [`src/scenarios/runner.py`](src/scenarios/runner.py). The
 
 ## 6. C++ edge port (Jetson-targeted)
 
-The [`cpp-edge-port`](https://github.com/raahimnawaz/vehicle-dynamics-ml-/tree/cpp-edge-port) branch ports the EKF and PINN to header-only, allocation-free C++17. Weights are baked into the binary at compile time via [`tools/export_weights.py`](tools/export_weights.py) — no file I/O, no PyTorch runtime, no ONNX dependency.
+The [`cpp-edge-port`](https://github.com/raahimnawaz/vehicle-dynamics-estimation/tree/cpp-edge-port) branch ports the EKF and PINN to header-only, allocation-free C++17. Weights are baked into the binary at compile time via [`tools/export_weights.py`](tools/export_weights.py) — no file I/O, no PyTorch runtime, no ONNX dependency.
 
 ### 6a. Latency
 
