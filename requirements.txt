@@ -1,4 +1,6 @@
-numpy
-matplotlib
-scipy
-torch
+numpy==2.4.4
+scipy==1.17.1
+matplotlib==3.10.9
+torch==2.11.0
+pandas==3.0.3
+pytest==9.0.3

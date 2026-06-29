@@ -1,0 +1,29 @@
+{
+  "host": {
+    "os": "Windows",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 113 Stepping 0, AuthenticAMD",
+    "python": "3.11.9"
+  },
+  "interpreter": "CPython 3.11.9",
+  "iterations": 5000,
+  "batch": 200,
+  "results": {
+    "ekf_step_ns": {
+      "median": 34145,
+      "p99": 55395,
+      "min": 29462,
+      "max": 84119,
+      "throughput_mops": 0.029286864841118757
+    },
+    "pinn_forward_ns": {
+      "median": 92197,
+      "p99": 130110,
+      "min": 79293,
+      "max": 243590,
+      "throughput_mops": 0.010846339902599868
+    }
+  },
+  "date": "2026-05-12",
+  "notes": "Per-op timings; batch=200 amortises perf_counter resolution. PINN inference here is a single-sample forward pass through a torch.nn.Sequential; PyTorch's per-call dispatch overhead dominates compared to the ~1 KB hand-rolled C++ path."
+}
