@@ -68,6 +68,75 @@ def bench_ekf(n_iters: int, batch: int) -> dict:
     return _summary(samples)
 
 
+class ScalarEkf:
+    """The same EKF written as plain Python scalars -- no NumPy.
+
+    This exists to keep the README's speedup claim honest. `VehicleEKF` calls
+    into NumPy on 2x2 arrays, where per-call dispatch costs far more than the
+    ~30 floating-point operations the filter actually performs. Benchmarking
+    hand-optimised C++ against that overstates the language gap by roughly an
+    order of magnitude, so we measure a fair Python baseline alongside it.
+
+    The math is identical to VehicleEKF, specialised for H = [1, 0].
+    """
+
+    __slots__ = ("v", "mu", "p00", "p01", "p10", "p11",
+                 "g", "k", "q_v", "q_mu", "r")
+
+    def __init__(self, v_init: float = 30.0, mu_init: float = 0.5) -> None:
+        self.v, self.mu = v_init, mu_init
+        self.p00, self.p01, self.p10, self.p11 = 1.0, 0.0, 0.0, 1.0
+        self.g, self.k = 9.81, K_DRAG
+        self.q_v, self.q_mu, self.r = 1e-1, 1e-2, 1.0
+
+    def predict(self, dt: float) -> None:
+        v, mu = self.v, self.mu
+        self.v = v + (-mu * self.g - self.k * v * v) * dt
+        a = 1.0 - dt * 2.0 * self.k * v
+        b = -self.g * dt
+        p00, p01, p10, p11 = self.p00, self.p01, self.p10, self.p11
+        # P = F P F^T + Q  with F = [[a, b], [0, 1]]
+        m00 = a * p00 + b * p10
+        m01 = a * p01 + b * p11
+        self.p00 = m00 * a + m01 * b + self.q_v
+        self.p01 = m01
+        self.p10 = p10 * a + p11 * b
+        self.p11 = p11 + self.q_mu
+
+    def update(self, z: float) -> None:
+        S = self.p00 + self.r
+        K0 = self.p00 / S
+        K1 = self.p10 / S
+        innov = z - self.v
+        self.v += K0 * innov
+        self.mu += K1 * innov
+        p00, p01, p10, p11 = self.p00, self.p01, self.p10, self.p11
+        self.p00 = (1.0 - K0) * p00
+        self.p01 = (1.0 - K0) * p01
+        self.p10 = -K1 * p00 + p10
+        self.p11 = -K1 * p01 + p11
+
+
+def bench_ekf_scalar(n_iters: int, batch: int) -> dict:
+    ekf = ScalarEkf()
+    for _ in range(200):
+        ekf.predict(0.01)
+        ekf.update(29.5)
+
+    samples: list[int] = []
+    sink = 0.0
+    for _ in range(n_iters):
+        t0 = time.perf_counter_ns()
+        for b in range(batch):
+            ekf.predict(0.01)
+            ekf.update(29.5 + (b % 7) * 0.01)
+            sink += ekf.mu
+        t1 = time.perf_counter_ns()
+        samples.append((t1 - t0) // batch)
+    _ = sink
+    return _summary(samples)
+
+
 def bench_pinn(n_iters: int, batch: int, weights: str) -> dict:
     net = MuNet()
     net.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True))
@@ -99,8 +168,9 @@ def main() -> None:
     ap.add_argument("--out",     default="benchmarks/x86_64-python.json")
     args = ap.parse_args()
 
-    ekf  = bench_ekf(args.n_iters, args.batch)
-    pinn = bench_pinn(args.n_iters, args.batch, args.weights)
+    ekf     = bench_ekf(args.n_iters, args.batch)
+    ekf_sc  = bench_ekf_scalar(args.n_iters, args.batch)
+    pinn    = bench_pinn(args.n_iters, args.batch, args.weights)
 
     data = {
         "host": {
@@ -114,14 +184,18 @@ def main() -> None:
         "batch": args.batch,
         "results": {
             "ekf_step_ns": ekf,
+            "ekf_step_scalar_ns": ekf_sc,
             "pinn_forward_ns": pinn,
         },
         "date": date.today().isoformat(),
         "notes": (
             "Per-op timings; batch=200 amortises perf_counter resolution. "
-            "PINN inference here is a single-sample forward pass through a "
-            "torch.nn.Sequential; PyTorch's per-call dispatch overhead "
-            "dominates compared to the ~1 KB hand-rolled C++ path."
+            "ekf_step_ns is the NumPy VehicleEKF; ekf_step_scalar_ns is the "
+            "same math in plain Python with no NumPy, and is the fair "
+            "baseline for a C++ comparison -- the gap between the two is "
+            "NumPy small-array dispatch, not a language gap. PINN inference "
+            "is a single-sample forward pass through a torch.nn.Sequential; "
+            "PyTorch's per-call dispatch dominates the ~1 KB C++ path."
         ),
     }
 
@@ -131,7 +205,10 @@ def main() -> None:
 
     print("=== Python benchmark ===")
     print(f"  EKF step    : median={ekf['median']:>6d} ns  p99={ekf['p99']:>6d} ns  "
-          f"min={ekf['min']:>6d} ns  ({ekf['throughput_mops']:.2f} Mops/s)")
+          f"min={ekf['min']:>6d} ns  ({ekf['throughput_mops']:.2f} Mops/s)  [NumPy]")
+    print(f"  EKF scalar  : median={ekf_sc['median']:>6d} ns  p99={ekf_sc['p99']:>6d} ns  "
+          f"min={ekf_sc['min']:>6d} ns  ({ekf_sc['throughput_mops']:.2f} Mops/s)  "
+          f"[no NumPy -- fair baseline]")
     print(f"  PINN forward: median={pinn['median']:>6d} ns  p99={pinn['p99']:>6d} ns  "
           f"min={pinn['min']:>6d} ns  ({pinn['throughput_mops']:.2f} Mops/s)")
     print(f"  wrote {args.out}")

@@ -1,0 +1,36 @@
+{
+  "host": {
+    "os": "Darwin",
+    "machine": "arm64",
+    "processor": "arm",
+    "python": "3.12.13"
+  },
+  "interpreter": "CPython 3.12.13",
+  "iterations": 3000,
+  "batch": 200,
+  "results": {
+    "ekf_step_ns": {
+      "median": 2520,
+      "p99": 2691,
+      "min": 2355,
+      "max": 2834,
+      "throughput_mops": 0.3968253968253968
+    },
+    "ekf_step_scalar_ns": {
+      "median": 289,
+      "p99": 323,
+      "min": 270,
+      "max": 395,
+      "throughput_mops": 3.4602076124567476
+    },
+    "pinn_forward_ns": {
+      "median": 10580,
+      "p99": 11065,
+      "min": 9915,
+      "max": 12341,
+      "throughput_mops": 0.0945179584120983
+    }
+  },
+  "date": "2026-08-28",
+  "notes": "Per-op timings; batch=200 amortises perf_counter resolution. ekf_step_ns is the NumPy VehicleEKF; ekf_step_scalar_ns is the same math in plain Python with no NumPy, and is the fair baseline for a C++ comparison -- the gap between the two is NumPy small-array dispatch, not a language gap. PINN inference is a single-sample forward pass through a torch.nn.Sequential; PyTorch's per-call dispatch dominates the ~1 KB C++ path."
+}
