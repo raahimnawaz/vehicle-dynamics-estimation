@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.physics.wheel import DEFAULTS
+
 
 class VehicleEKF:
     def __init__(self, mu_init: float = 0.3, v_init: float = 30.0) -> None:
@@ -55,8 +57,12 @@ class VehicleEKF:
         # `cpp/include/vd/ekf.hpp` uses an equivalent parameterisation with
         # k_cpp = rho_cd_a / (2 * m), reconciled by tools/parity_check.py.
         self.g = 9.81
-        self.m = 1500.0
-        self.rho_cd_a = 0.02 * 2 * self.m
+        self.m = DEFAULTS["m"]
+        # rho*Cd*A in kg/m. The drag term below is (rho_cd_a / 2m) * v^2, so
+        # this must equal 2 * DEFAULTS["k"] = 0.8 kg/m -- i.e. exactly the
+        # K_DRAG the forward models use. An earlier version hardcoded
+        # 0.02 * 2 * m here, making the filter's drag 75x the truth's.
+        self.rho_cd_a = 2.0 * DEFAULTS["k"]
 
     def predict(self, dt: float) -> None:
         v = self.x[0]

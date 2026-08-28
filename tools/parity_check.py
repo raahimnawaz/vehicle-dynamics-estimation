@@ -21,6 +21,29 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from src.estimation.kalman import VehicleEKF  # noqa: E402
 from src.ml.pinn import MuNet  # noqa: E402
+from src.physics.wheel import K_DRAG  # noqa: E402
+
+
+def assert_drag_constant_in_lockstep() -> None:
+    """The C++ port hardcodes its drag coefficient; Python derives it from
+    wheel.DEFAULTS. A silent divergence between the two is exactly the class of
+    bug that made the model-mismatch study meaningless, so assert it here
+    rather than trusting a comment."""
+    import re
+    hdr = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                       "cpp", "include", "vd", "ekf.hpp")
+    with open(hdr) as f:
+        m = re.search(r"double\s+k\s*=\s*([0-9.eE+-]+)\s*;", f.read())
+    if m is None:
+        raise SystemExit("could not find the drag constant in cpp/include/vd/ekf.hpp")
+    k_cpp = float(m.group(1))
+    if abs(k_cpp - K_DRAG) > 1e-12:
+        raise SystemExit(
+            f"drag constant diverged: C++ ekf.hpp k={k_cpp!r} but "
+            f"Python wheel.K_DRAG={K_DRAG!r}. Fix one of them before trusting "
+            f"any parity number below."
+        )
+    print(f"  drag constant in lockstep: {k_cpp:.6e} (C++) == {K_DRAG:.6e} (Python)")
 
 
 def _run_cpp(binary: str, subcmd: str, input_csv: str, out_csv: str) -> None:
@@ -33,7 +56,7 @@ def _run_cpp(binary: str, subcmd: str, input_csv: str, out_csv: str) -> None:
 
 def parity_ekf(binary: str, n_steps: int = 2000, dt: float = 0.01) -> None:
     rng = np.random.default_rng(0)
-    true_mu, true_k = 0.7, 0.02
+    true_mu, true_k = 0.7, K_DRAG
     v = 30.0
     # generate a synthetic noisy trace, store (t, dt, z) per row
     ts = np.arange(n_steps) * dt
@@ -55,9 +78,9 @@ def parity_ekf(binary: str, n_steps: int = 2000, dt: float = 0.01) -> None:
     _run_cpp(binary, "ekf", in_csv, out_csv)
 
     # Python EKF parameterises drag as `(rho_cd_a / (2m)) * v^2`; the C++ port
-    # uses `k * v^2` directly. Reconcile with rho_cd_a = 2 * m * k_cpp = 60.
+    # uses `k * v^2` directly. Reconcile with rho_cd_a = 2 * m * k_cpp.
     ekf = VehicleEKF(mu_init=0.5, v_init=float(v_obs[0]))
-    K_CPP = 0.02
+    K_CPP = K_DRAG
     ekf.rho_cd_a = 2.0 * ekf.m * K_CPP
     ekf.Q[0, 0] = 1e-1
     ekf.Q[1, 1] = 1e-2
@@ -128,6 +151,7 @@ def main() -> None:
         else:
             print(f"parity binary not found at {args.binary}; build with `make -C cpp parity`")
             sys.exit(2)
+    assert_drag_constant_in_lockstep()
     parity_ekf(args.binary)
     parity_pinn(args.binary, args.weights)
 

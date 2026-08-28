@@ -8,8 +8,10 @@ from src.estimation.optimize import estimate
 from src.visualization.plot import plot
 from src.estimation.kalman import VehicleEKF
 
+from src.physics.wheel import K_DRAG
+
 true_mu = 0.7
-true_k = 0.02
+true_k = K_DRAG
 v0 = 30
 dt = 0.01
 t = np.arange(0, 10, dt)

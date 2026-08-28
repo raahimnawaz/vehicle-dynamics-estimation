@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.estimation.kalman import VehicleEKF
+from src.physics.wheel import K_DRAG
 from src.simulation.run_sim import simulate
 
 
@@ -29,7 +30,7 @@ def run_scenario(
     v0: float = 30.0,
     dt: float = 0.01,
     t_final: float = 6.0,
-    k: float = 0.02,
+    k: float = K_DRAG,
     q_mu: float = 1e-3,
     seed: int = 0,
 ) -> ScenarioResult:

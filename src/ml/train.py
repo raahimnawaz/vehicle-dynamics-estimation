@@ -4,6 +4,8 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 
+from src.physics.wheel import K_DRAG
+
 
 
 class FrictionNet(nn.Module):
@@ -27,7 +29,7 @@ def generate_training_data(num_samples, window_size, dt=0.01):
     y = []
     
     g = 9.81
-    k = 0.02 
+    k = K_DRAG   # was 0.02 -- 75x too large; see wheel.K_DRAG
     
     for _ in range(num_samples):
         true_mu = np.random.uniform(0.3, 1.0) 

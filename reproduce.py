@@ -34,7 +34,13 @@ from src.ml.pinn import (
     train_pinn_2d,
 )
 from src.ml.train import FrictionNet
-from src.physics.wheel import DEFAULTS, PACEJKA_DRY, mu_pacejka, pacejka_peak
+from src.physics.wheel import (
+    DEFAULTS,
+    K_DRAG,
+    PACEJKA_DRY,
+    mu_pacejka,
+    pacejka_peak,
+)
 DEFAULTS_K = DEFAULTS["k"]
 DEFAULTS_M = DEFAULTS["m"]
 from src.scenarios.adversarial import biased_sensor, clean_sensor, dropout_sensor, mu_step
@@ -52,7 +58,7 @@ def run_synthetic(seed: int = 0) -> dict:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    true_mu, true_k, v0, dt = 0.7, 0.02, 30.0, 0.01
+    true_mu, true_k, v0, dt = 0.7, K_DRAG, 30.0, 0.01
     t = np.arange(0, 10, dt)
 
     v_true = simulate([true_mu, true_k], v0, t, dt)
@@ -338,6 +344,7 @@ def run_pinn(seed: int = 0, epochs: int = 6000) -> None:
     os.makedirs("models", exist_ok=True)
     torch.save(net_mu.state_dict(), os.path.join("models", "pinn_mu.pth"))
     torch.save(net_pj.state_dict(), os.path.join("models", "pacejka_net.pth"))
+
 
 
 def run_pinn_brake(seed: int = 0, epochs: int = 5000) -> None:

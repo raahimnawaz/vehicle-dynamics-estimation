@@ -7,10 +7,11 @@ import numpy as np
 
 from src.estimation.optimize import estimate
 from src.simulation.run_sim import simulate
+from src.physics.wheel import K_DRAG
 
 
 def test_recovers_parameters_noiseless():
-    true_mu, true_k = 0.7, 0.02
+    true_mu, true_k = 0.7, K_DRAG
     v0, dt = 30.0, 0.01
     t = np.arange(0, 4, dt)
     v = simulate([true_mu, true_k], v0, t, dt)
@@ -23,7 +24,7 @@ def test_recovers_parameters_noiseless():
 
 def test_recovers_mu_under_modest_noise():
     rng = np.random.default_rng(0)
-    true_mu, true_k = 0.7, 0.02
+    true_mu, true_k = 0.7, K_DRAG
     v0, dt = 30.0, 0.01
     t = np.arange(0, 4, dt)
     v = simulate([true_mu, true_k], v0, t, dt) + rng.normal(0, 0.1, size=len(t))

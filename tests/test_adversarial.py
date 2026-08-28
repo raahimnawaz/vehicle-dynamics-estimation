@@ -9,6 +9,7 @@ import numpy as np
 
 from src.scenarios.adversarial import biased_sensor, clean_sensor, dropout_sensor, mu_step
 from src.scenarios.runner import run_scenario
+from src.physics.wheel import K_DRAG
 
 
 def test_ekf_reacquires_after_mu_step():
@@ -65,6 +66,6 @@ def test_simulate_accepts_callable_mu():
     from src.simulation.run_sim import simulate
 
     t = np.arange(0, 4, 0.01)
-    v_const = simulate([0.7, 0.02], 30.0, t, 0.01)
-    v_callable = simulate([lambda ti: 0.7, 0.02], 30.0, t, 0.01)
+    v_const = simulate([0.7, K_DRAG], 30.0, t, 0.01)
+    v_callable = simulate([lambda ti: 0.7, K_DRAG], 30.0, t, 0.01)
     assert np.allclose(v_const, v_callable)

@@ -8,6 +8,7 @@ the time loop, or the physics function.
 import numpy as np
 
 from src.simulation.run_sim import simulate
+from src.physics.wheel import K_DRAG
 
 
 def test_velocity_constant_when_no_forces():
@@ -25,7 +26,7 @@ def test_velocity_monotone_decreasing_with_friction():
     v0 = 30.0
     dt = 0.01
     t = np.arange(0, 3, dt)
-    v = simulate([0.7, 0.02], v0, t, dt)
+    v = simulate([0.7, K_DRAG], v0, t, dt)
     diffs = np.diff(v)
     # speed never increases while above the v=0 clamp
     assert np.all(diffs <= 1e-9), "velocity should monotonically decrease under braking"

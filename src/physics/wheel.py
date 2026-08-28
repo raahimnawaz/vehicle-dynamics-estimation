@@ -33,8 +33,24 @@ import numpy as np
 DEFAULTS = {
     "m": 1500.0,
     "g": 9.81,
-    "k": 0.4,    # lumped 0.5*rho*Cd*A so drag = k*v^2
+    "k": 0.4,    # lumped 0.5*rho*Cd*A (kg/m), so drag FORCE = k*v^2
 }
+
+# THE single drag coefficient for the whole repo, in the form the acceleration
+# equations actually use:
+#
+#     dv/dt = -mu*g - K_DRAG * v^2          [K_DRAG has units 1/m]
+#
+# Every model here -- the slip-aware one below, the constant-mu one in
+# `model.py`, the EKF, the FrictionNet training set and the C++ port -- must
+# use this value. They previously did not: callers of `model.py` hardcoded
+# k = 0.02, which is 75x this value and implies ~15.7 m/s^2 of aerodynamic
+# deceleration at 28 m/s -- roughly twice the entire braking force available
+# from a tire on dry asphalt.
+#
+# Sanity check: 0.4 / 1500 = 2.67e-4 gives 0.21 m/s^2 of drag at 28 m/s,
+# the right order for a passenger car (rho*Cd*A ~ 0.8 kg/m).
+K_DRAG = DEFAULTS["k"] / DEFAULTS["m"]
 
 # Pacejka longitudinal-force parameter sets. B is stiffness, C is shape factor,
 # D is peak coefficient (= mu_max), E controls the curvature past the peak.

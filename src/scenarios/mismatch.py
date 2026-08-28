@@ -39,7 +39,7 @@ from src.estimation.kalman import VehicleEKF
 from src.estimation.optimize import estimate
 from src.ml.pinn import MuNet, MuNet2D
 from src.ml.train import FrictionNet
-from src.physics.wheel import DEFAULTS, PACEJKA_DRY, mu_pacejka, ramp_slip
+from src.physics.wheel import DEFAULTS, K_DRAG, PACEJKA_DRY, mu_pacejka, ramp_slip
 from src.simulation.run_sim import simulate as simple_simulate
 
 
@@ -138,7 +138,7 @@ def fit_ekf(t, v_obs, s_traj, p_traj):
             ekf.predict(dt)
             ekf.update(vi)
     mu_est = float(ekf.x[1])
-    v_pred = simple_simulate([mu_est, 0.02], v0, t, dt)
+    v_pred = simple_simulate([mu_est, K_DRAG], v0, t, dt)
     return ("EKF", v_pred, mu_est)
 
 
@@ -153,7 +153,7 @@ def fit_nn(t, v_obs, s_traj, p_traj, weights_path: str = "models/friction_net.pt
     win = torch.tensor(v_obs[start:start + window_size], dtype=torch.float32)
     with torch.no_grad():
         mu_est = float(net(win).item())
-    v_pred = simple_simulate([mu_est, 0.02], v0, t, dt)
+    v_pred = simple_simulate([mu_est, K_DRAG], v0, t, dt)
     return ("NN (FrictionNet)", v_pred, mu_est)
 
 

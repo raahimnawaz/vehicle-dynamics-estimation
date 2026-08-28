@@ -23,7 +23,9 @@ struct EkfParams {
     // The Python EKF parameterises drag as rho_cd_a / (2m) instead; the
     // parity_check.py harness reconciles the two so this port is a true
     // numerical mirror, not a re-derivation.
-    double k       = 0.02;
+    // = DEFAULTS["k"] / DEFAULTS["m"] = 0.4 / 1500 on the Python side.
+    // Keep these two in lockstep; tools/parity_check.py asserts it.
+    double k       = 2.6666666666666668e-04;
     double q_v     = 1e-1;  // process noise on v
     double q_mu    = 1e-2;  // process noise on mu (tune per scenario)
     double r       = 1.0;   // measurement noise on v

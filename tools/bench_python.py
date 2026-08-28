@@ -27,6 +27,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from src.estimation.kalman import VehicleEKF  # noqa: E402
 from src.ml.pinn import MuNet  # noqa: E402
+from src.physics.wheel import K_DRAG  # noqa: E402
 
 
 def _summary(samples: list[int]) -> dict:
@@ -43,7 +44,7 @@ def _summary(samples: list[int]) -> dict:
 
 def bench_ekf(n_iters: int, batch: int) -> dict:
     ekf = VehicleEKF(mu_init=0.5, v_init=30.0)
-    ekf.rho_cd_a = 60.0
+    ekf.rho_cd_a = 2.0 * ekf.m * K_DRAG
     ekf.Q[0, 0] = 1e-1
     ekf.Q[1, 1] = 1e-2
     ekf.R[0, 0] = 1.0

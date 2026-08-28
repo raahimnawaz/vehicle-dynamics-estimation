@@ -23,6 +23,8 @@ sample a time-varying slip schedule mid-step.
 
 from __future__ import annotations
 
+from src.physics.wheel import K_DRAG  # noqa: F401  (re-exported for callers)
+
 
 def dvdt(v: float, m: float, mu: float, g: float, k: float) -> float:
     """Constant-mu longitudinal braking dynamics. See module docstring."""
