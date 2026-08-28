@@ -55,6 +55,16 @@ def main() -> None:
     W3 = layers[2].weight.detach().numpy()  # (1, H)
     b3 = layers[2].bias.detach().numpy()    # (1,)
 
+    # Recover the output scale straight from the model rather than hardcoding
+    # it on the C++ side. MuNet.forward is `scale * sigmoid(net(s))`, so
+    # scale = forward(s) / sigmoid(raw(s)) exactly, for any s. This existed as
+    # a literal 1.2 in cpp/include/vd/pinn.hpp while MuNet used 1.1, which made
+    # every C++ inference 9.1% high and broke the published parity figure.
+    with torch.no_grad():
+        probe = torch.tensor([0.1])
+        raw = net.net(probe.view(-1, 1)).squeeze(-1)
+        out_scale = float((net(probe) / torch.sigmoid(raw)).item())
+
     H = args.hidden
     assert W1.shape == (H, 1)
     assert W2.shape == (H, H)
@@ -66,7 +76,10 @@ def main() -> None:
         f.write("// Source: models/pinn_mu.pth\n")
         f.write("#pragma once\n\n")
         f.write("namespace vd::pinn_weights {\n\n")
-        f.write(f"constexpr int kHidden = {H};\n\n")
+        f.write(f"constexpr int kHidden = {H};\n")
+        f.write("// Output activation is kOutScale * sigmoid(.), read off the\n"
+                "// PyTorch module at export time so the two cannot diverge.\n")
+        f.write(f"constexpr double kOutScale = {out_scale:.17g};\n\n")
         _emit_array("W1", W1, H, 1, f)
         _emit_array("b1", b1, H, 1, f)
         _emit_array("W2", W2, H, H, f)

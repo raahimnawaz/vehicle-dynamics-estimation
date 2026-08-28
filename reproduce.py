@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
@@ -219,6 +220,20 @@ def run_adversarial() -> None:
     print(f"  wrote = {out}")
 
 
+
+def _export_pinn_weights_to_cpp() -> None:
+    """Regenerate `cpp/include/vd/pinn_weights.h` from `models/pinn_mu.pth`."""
+    import subprocess
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "tools", "export_weights.py")
+    res = subprocess.run([sys.executable, tool], capture_output=True, text=True)
+    if res.returncode != 0:
+        print("  WARNING: could not re-export C++ PINN weights:",
+              res.stderr.strip().splitlines()[-1] if res.stderr.strip() else "")
+    else:
+        print("  re-baked cpp/include/vd/pinn_weights.h from models/pinn_mu.pth")
+
+
 def run_pinn(seed: int = 0, epochs: int = 6000) -> None:
     """Train BOTH the free-form PINN (MuNet) and the grey-box PacejkaNet on
     the same Pacejka-truth dataset, then plot them side by side. The figure
@@ -345,6 +360,11 @@ def run_pinn(seed: int = 0, epochs: int = 6000) -> None:
     torch.save(net_mu.state_dict(), os.path.join("models", "pinn_mu.pth"))
     torch.save(net_pj.state_dict(), os.path.join("models", "pacejka_net.pth"))
 
+    # Re-bake the C++ weights header from the net we just trained. Without
+    # this, `reproduce.py --all` silently invalidates the C++ parity claim:
+    # models/pinn_mu.pth moves and cpp/include/vd/pinn_weights.h does not,
+    # and tools/parity_check.py then reports ~1e-1 instead of ~1e-7.
+    _export_pinn_weights_to_cpp()
 
 
 def run_pinn_brake(seed: int = 0, epochs: int = 5000) -> None:

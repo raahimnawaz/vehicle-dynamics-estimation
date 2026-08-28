@@ -1,7 +1,12 @@
 // PINN forward pass: s -> mu.
 //
 // Architecture mirrors src/ml/pinn.py::MuNet exactly:
-//   Linear(1, H) -> tanh -> Linear(H, H) -> tanh -> Linear(H, 1) -> 1.2 * sigmoid
+//   Linear(1, H) -> tanh -> Linear(H, H) -> tanh -> Linear(H, 1)
+//     -> kOutScale * sigmoid
+//
+// kOutScale is emitted into pinn_weights.h by the exporter, read directly off
+// the PyTorch module. It used to be a hardcoded 1.2 here while MuNet applied
+// 1.1, so every inference came out 9.1% high.
 //
 // Weights are baked into the binary by tools/export_weights.py — there is no
 // run-time file I/O, malloc, or external dependency. The forward pass uses a
@@ -40,9 +45,9 @@ public:
         double out = vd::pinn_weights::b3[0];
         for (int j = 0; j < H; ++j) out += vd::pinn_weights::W3[j] * h2[j];
 
-        // 1.2 * sigmoid(out)
+        // kOutScale * sigmoid(out)
         const double sigmoid = 1.0 / (1.0 + std::exp(-out));
-        return 1.2 * sigmoid;
+        return vd::pinn_weights::kOutScale * sigmoid;
     }
 };
 
