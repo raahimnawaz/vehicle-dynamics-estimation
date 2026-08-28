@@ -47,7 +47,7 @@ def test_simulate_decelerates_under_slip():
 
 @pytest.mark.slow
 def test_munet_recovers_pacejka_shape():
-    """Free-form MuNet (concavity prior) must recover the Pacejka shape."""
+    """Free-form MuNet (no shape prior) must recover the Pacejka shape."""
     ds, meta = generate_dataset(n_runs=12, t_final=4.0, seed=0)
     net, _ = train_pinn(ds, epochs=3000, seed=0)
     s, mu_hat = evaluate_curve(net, n=200, s_max=0.3)

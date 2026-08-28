@@ -1,7 +1,11 @@
 """Bake the trained PINN weights into a C++ header.
 
 The model is a small MLP s -> mu with architecture:
-    Linear(1, H) -> Tanh -> Linear(H, H) -> Tanh -> Linear(H, 1) -> 1.2 * sigmoid
+    Linear(1, H) -> Tanh -> Linear(H, H) -> Tanh -> Linear(H, 1) -> kOutScale * sigmoid
+
+The output scale is not written down here or in the C++: it is read off the
+PyTorch module at export time and emitted as `kOutScale`, so the two sides
+cannot drift apart the way they did when both hardcoded it.
 
 This script reads `models/pinn_mu.pth` and writes
 `cpp/include/vd/pinn_weights.h` containing the weights and biases as

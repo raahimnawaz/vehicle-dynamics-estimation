@@ -222,16 +222,25 @@ def run_adversarial() -> None:
 
 
 def _export_pinn_weights_to_cpp() -> None:
-    """Regenerate `cpp/include/vd/pinn_weights.h` from `models/pinn_mu.pth`."""
+    """Regenerate `cpp/include/vd/pinn_weights.h` from `models/pinn_mu.pth`.
+
+    Raises on failure instead of warning. By the time this runs the .pth on
+    disk is already the freshly trained net, so a failed export leaves the pair
+    out of sync -- and a warning buried in a long `--all` run that still exits 0
+    is exactly how the C2 drift went unnoticed. Fail loudly, then re-run
+    `python tools/export_weights.py` once the cause is fixed.
+    """
     import subprocess
     tool = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "tools", "export_weights.py")
     res = subprocess.run([sys.executable, tool], capture_output=True, text=True)
     if res.returncode != 0:
-        print("  WARNING: could not re-export C++ PINN weights:",
-              res.stderr.strip().splitlines()[-1] if res.stderr.strip() else "")
-    else:
-        print("  re-baked cpp/include/vd/pinn_weights.h from models/pinn_mu.pth")
+        detail = (res.stderr.strip() or res.stdout.strip()
+                  or f"exit status {res.returncode}, no output")
+        raise RuntimeError(
+            "could not re-export C++ PINN weights, so models/pinn_mu.pth and "
+            "cpp/include/vd/pinn_weights.h are now out of sync:\n" + detail)
+    print("  re-baked cpp/include/vd/pinn_weights.h from models/pinn_mu.pth")
 
 
 def run_pinn(seed: int = 0, epochs: int = 6000) -> None:
@@ -239,9 +248,14 @@ def run_pinn(seed: int = 0, epochs: int = 6000) -> None:
     the same Pacejka-truth dataset, then plot them side by side. The figure
     is the cost-of-priors story:
 
-      * MuNet with a concavity prior recovers the shape but not the exact
-        peak position -- the cost of being function-free.
+      * MuNet is function-free and carries no shape prior. The 1D problem is
+        well posed, so the ODE residual alone recovers the curve including the
+        interior peak (mean |dmu| ~ 0.013).
       * PacejkaNet is a 4-scalar parametric fit; it nails the curve.
+
+    See README section 3a: what used to read here as "the cost of being
+    function-free" was mostly the cost of a concavity prior that penalised the
+    true curve. `pinn_loss` now defaults to `lam_concave = 0.0`.
     """
     ds, meta = generate_dataset(n_runs=16, t_final=4.0, seed=seed)
     s_peak, mu_peak = pacejka_peak(**PACEJKA_DRY)
