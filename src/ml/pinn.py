@@ -3,9 +3,10 @@
 Three networks are exposed, illustrating a spectrum from "function-free" to
 "grey-box parametric":
 
-  * `MuNet`       : s -> mu, free-form MLP with a concavity prior.
+  * `MuNet`       : s -> mu, free-form MLP, no shape prior by default.
                     Recovers Pacejka shape (rise, peak, fall) without being
-                    told the functional form.
+                    told the functional form. See `pinn_loss` for why the
+                    shape prior this repo used to ship was removed.
   * `MuNet2D`     : (s, p) -> mu, factorised mu(s) * ramp(p).
                     Required when brake-force lag (time-varying mu_eff) is
                     in play -- adds normalised brake pressure as a 2nd input.
@@ -15,17 +16,25 @@ Three networks are exposed, illustrating a spectrum from "function-free" to
                     parameter ID -- the cleanest recovery the data allows.
 
 The structural-prior story is the point of having both `MuNet` and
-`PacejkaNet` in the repo:
+`PacejkaNet` in the repo. Three shape priors were tried on MuNet and all
+three encoded a false claim about tire physics -- see `pinn_loss` for the
+full account and the numbers:
 
-  * Symmetric smoothness (`mean d2mu^2`) penalises curvature in BOTH
-    directions, which actively discourages the post-peak peak-and-fall shape.
-    That was the original failure mode.
-  * The correct shape prior for a single-arch tire curve is *concavity*:
-    `mean relu(d2mu/ds2)^2`. It penalises only POSITIVE curvature, allowing
-    the network to form a peak and then descend.
-  * Layering `PacejkaNet` alongside `MuNet` makes the cost of "function-free"
-    explicit: MuNet must rediscover the shape; PacejkaNet only fits 4 scalars
-    and recovers the curve almost exactly.
+  * Monotonicity (`relu(-d_mu/ds)^2`) forbids the post-peak fall outright.
+  * Symmetric smoothness (`mean d2mu^2`) penalises the concavity that forms
+    the peak exactly as hard as convexity.
+  * One-sided concavity (`relu(d2mu/ds2)^2`) penalises the post-peak
+    FLATTENING, because the true curve is convex over the last 22% of the
+    slip range as it approaches the sliding-friction asymptote.
+
+No shape prior is applied by default now. Only `mu(0) = 0` remains, which is
+a physical constraint rather than a guess about curve shape. Free-form
+recovery then lands at mean |d_mu| = 0.013 against the grey-box net's
+0.007 -- so the real cost of being function-free is far smaller than it
+looked while a misspecified prior was in the way.
+
+Layering `PacejkaNet` alongside `MuNet` still makes that cost explicit:
+MuNet rediscovers the shape, PacejkaNet only fits 4 scalars.
 
 Pipeline:
   generate_dataset(...)         : roll forward Pacejka truth + sensor noise
@@ -263,18 +272,42 @@ def generate_dataset_braking(
     return ds, meta
 
 
-def pinn_loss(net: MuNet, ds: Dataset, lam_concave: float = 1.0,
+def pinn_loss(net: MuNet, ds: Dataset, lam_concave: float = 0.0,
               lam_zero: float = 2.0) -> tuple[torch.Tensor, dict]:
-    """Loss = ODE residual + concavity prior + boundary.
+    """Loss = ODE residual + boundary (+ optional concavity prior).
 
-    The concavity prior penalises POSITIVE second derivative only -- it
-    enforces a single-arch shape (rise, peak, fall) without prescribing where
-    the peak sits. Symmetric d2_mu^2 priors actively discourage the post-peak
-    descent (high concavity = high curvature = penalised), which was the
-    fundamental failure mode of the previous loss. This penalty allows the
-    descent.
+    `lam_concave` defaults to 0. Read the history before turning it back on --
+    this loss went through three shape priors and every one of them encoded a
+    claim about tire physics that turned out to be false:
 
-    The boundary term pins mu(0) ~ 0 (no force without slip).
+      1. Monotonicity, penalising d_mu/ds < 0. A real tire curve FALLS after
+         the peak, so this forbade the correct answer outright. The network
+         saturated and it read as a capacity problem.
+
+      2. Symmetric smoothness, penalising (d2_mu/ds2)^2. Same defect in
+         disguise: it punishes the concavity that FORMS the peak exactly as
+         hard as convexity.
+
+      3. One-sided concavity, penalising relu(d2_mu/ds2)^2 -- the version
+         this repo shipped. Subtler, and still wrong. The true Pacejka curve
+         is CONVEX on s in [0.233, 0.300], 22.3% of the evaluation range,
+         because the post-peak fall flattens out toward the sliding-friction
+         asymptote. The prior penalises exactly that flattening; the penalty
+         it assigns to the ground-truth curve is 0.34, not 0.
+
+    With the prior on, the recovered curve has no interior peak at all -- its
+    maximum sits at the right edge of the grid on every seed tested. Dropping
+    it recovers the peak at s = 0.124-0.127 (truth: 0.127) with mean |d_mu| of
+    0.013, against 0.061 with the prior, consistently across seeds.
+
+    The data does not need the help: pointwise inversion of the ODE residual
+    puts the empirical peak at s = 0.110, mu = 0.897, close to the true
+    (0.127, 0.900). The shape was always in the measurements -- each prior was
+    an assumption fighting them.
+
+    The boundary term pins mu(0) ~ 0 (no force without slip), which is a
+    genuine physical constraint rather than a guess about curve shape, and
+    stays on.
     """
     p = DEFAULTS
     s = torch.tensor(ds.s, dtype=torch.float32)
@@ -285,12 +318,17 @@ def pinn_loss(net: MuNet, ds: Dataset, lam_concave: float = 1.0,
     dv_pred = -mu * p["g"] - (p["k"] / p["m"]) * v * v
     loss_data = torch.mean((dv - dv_pred) ** 2)
 
-    # Concavity on a dense grid: d2_mu / ds2 <= 0.
-    s_grid = torch.linspace(0.0, 0.3, 80, requires_grad=True)
-    mu_grid = net(s_grid)
-    dmu_ds = torch.autograd.grad(mu_grid.sum(), s_grid, create_graph=True)[0]
-    d2mu_ds2 = torch.autograd.grad(dmu_ds.sum(), s_grid, create_graph=True)[0]
-    loss_concave = torch.mean(torch.relu(d2mu_ds2) ** 2)
+    # Optional concavity prior on a dense grid: d2_mu / ds2 <= 0. Off by
+    # default -- see the docstring. Skipped entirely when lam_concave == 0 so
+    # we do not pay for two autograd passes we are going to multiply by zero.
+    if lam_concave > 0.0:
+        s_grid = torch.linspace(0.0, 0.3, 80, requires_grad=True)
+        mu_grid = net(s_grid)
+        dmu_ds = torch.autograd.grad(mu_grid.sum(), s_grid, create_graph=True)[0]
+        d2mu_ds2 = torch.autograd.grad(dmu_ds.sum(), s_grid, create_graph=True)[0]
+        loss_concave = torch.mean(torch.relu(d2mu_ds2) ** 2)
+    else:
+        loss_concave = torch.zeros((), dtype=torch.float32)
 
     # mu(0) = 0
     loss_zero = (net(torch.tensor([0.0])) ** 2).mean()
@@ -305,6 +343,21 @@ def pinn_loss(net: MuNet, ds: Dataset, lam_concave: float = 1.0,
 
 def pinn_loss_2d(net: MuNet2D, ds: BrakeDataset, lam_concave: float = 1.0,
                  lam_mono_p: float = 0.5) -> tuple[torch.Tensor, dict]:
+    """Loss for the factorised mu(s) * ramp(p) net.
+
+    Note the deliberate asymmetry with `pinn_loss`: the concavity prior is OFF
+    by default there and ON here, and that is not an oversight.
+
+    The 1D problem is well posed -- mu(s) is the only unknown, so the residual
+    determines it and any shape prior can only inject bias. The 2D
+    factorisation is under-determined: mu(s) * ramp(p) admits a family of
+    (shape, scale) splits that fit the residual equally well, so it needs
+    something to pin the split. Measured over three seeds, dropping the prior
+    here degrades mean |d_mu(s)| from ~0.055 to ~0.309 and pushes the peak to
+    the edge of the grid, while `lam_pin` alone is not enough.
+
+    So: prior off where the problem is identifiable, prior on where it is not.
+    """
     p_def = DEFAULTS
     s = torch.tensor(ds.s, dtype=torch.float32)
     pr = torch.tensor(ds.p, dtype=torch.float32)
