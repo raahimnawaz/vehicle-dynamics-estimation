@@ -8,8 +8,6 @@ A reproducible benchmark for vehicle-dynamics system identification: first-princ
 
 The repo is structured to make every claim verifiable — `python reproduce.py --all` regenerates every figure and number in this README from seeded inputs.
 
-> **Read [Corrections](#corrections) before citing older numbers.** An audit in August 2026 found three defects that materially changed the results: a 75× drag-coefficient inconsistency between the two forward models, a wrong activation scale in the C++ PINN port, and a shape prior that penalised the ground truth. All three are fixed; the tables below are post-fix. The corrections section documents what moved and why, because the process of finding them is more instructive than the final numbers.
-
 ---
 
 ## Quickstart
