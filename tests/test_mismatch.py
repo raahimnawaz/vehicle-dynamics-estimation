@@ -36,17 +36,50 @@ def test_headwind_adds_drag():
 
 
 @pytest.mark.slow
+def test_no_method_is_broken_at_nominal():
+    """Every estimator must be near the noise floor when no effect is active.
+
+    This is the regression guard that was missing. A constant-mu fitter whose
+    drag coefficient disagrees with the truth simulator shows a large, roughly
+    constant error at EVERY intensity including the nominal one -- which is
+    exactly how the 75x drag mismatch between `model.py`'s callers and
+    `wheel.py` hid for so long. The old ranking test asserted the NN's mean
+    error was ABOVE 10%, so it pinned that bug in place instead of catching it.
+    """
+    cells = run_sweep()
+    nominal = [c for c in cells
+               if (c.effect == "grade" and c.intensity == 0.0)
+               or (c.effect == "brake" and c.intensity == 0.01)]
+    assert nominal, "no nominal cells found"
+    for c in nominal:
+        assert c.rmse_norm < 0.05, (
+            f"{c.method} is at {100 * c.rmse_norm:.1f}% RMSE/v0 with effect "
+            f"'{c.effect}' at its nominal intensity -- it should be near the "
+            f"noise floor. Suspect a model/parameter inconsistency, not "
+            f"mismatch sensitivity."
+        )
+
+
+@pytest.mark.slow
 def test_sweep_qualitative_ranking():
-    """Batch should be the most robust, NN the most out-of-distribution."""
+    """Batch is most robust; the brake ramp is what separates the rest."""
     cells = run_sweep()
     by_method = {}
     for c in cells:
         by_method.setdefault(c.method, []).append(c.rmse_norm)
     means = {m: float(np.mean(v)) for m, v in by_method.items()}
 
-    # Batch has the lowest mean RMSE.
+    # The offline batch fit carries k_drag as a free parameter, so it absorbs
+    # structural error the online methods have to eat. It should win overall.
     assert means["Batch (SciPy)"] == min(means.values()), means
-    # NN is consistently mismatched (>10% RMSE/v0 on average).
-    assert means["NN (FrictionNet)"] > 0.10
-    # Either PINN beats EKF on average.
-    assert means["PINN"] < means["EKF"]
+
+    # The headline finding: on the brake ramp -- time-varying friction that a
+    # slip-only model cannot represent -- the brake-aware PINN holds while
+    # every other online method degrades badly.
+    worst_brake = {}
+    for c in cells:
+        if c.effect == "brake":
+            worst_brake[c.method] = max(worst_brake.get(c.method, 0.0), c.rmse_norm)
+    assert worst_brake["PINN-B (brake-aware)"] < 0.10, worst_brake
+    for other in ("EKF", "NN (FrictionNet)", "PINN"):
+        assert worst_brake[other] > 2 * worst_brake["PINN-B (brake-aware)"], worst_brake
