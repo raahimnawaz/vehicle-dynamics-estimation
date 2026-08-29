@@ -13,26 +13,47 @@ from src.scenarios.mismatch import EFFECTS, run_sweep, simulate_truth
 
 def test_truth_simulator_decreasing():
     t = np.arange(0, 3.0, 0.01)
-    v, s, p = simulate_truth(28.0, t, effect="grade", intensity=0.0)
+    v, s, p, n = simulate_truth(28.0, t, effect="grade", intensity=0.0)
     assert v.shape == t.shape
     assert v[-1] < v[0]
     assert np.all(s >= 0.0)
     # brake-pressure factor in [0, 1]
     assert np.all((p >= 0.0) & (p <= 1.0 + 1e-9))
+    # lateral utilisation in [0, 1); zero when cornering is not the effect
+    assert np.all((n >= 0.0) & (n < 1.0))
+    assert np.all(n == 0.0)
 
 
 def test_grade_adds_deceleration():
     t = np.arange(0, 3.0, 0.01)
-    v_flat,  _, _ = simulate_truth(28.0, t, effect="grade", intensity=0.0)
-    v_steep, _, _ = simulate_truth(28.0, t, effect="grade", intensity=0.10)
+    v_flat,  _, _, _ = simulate_truth(28.0, t, effect="grade", intensity=0.0)
+    v_steep, _, _, _ = simulate_truth(28.0, t, effect="grade", intensity=0.10)
     assert v_steep[-1] < v_flat[-1] + 1e-6, "uphill should decelerate more"
 
 
 def test_headwind_adds_drag():
     t = np.arange(0, 3.0, 0.01)
-    v_calm, _, _ = simulate_truth(28.0, t, effect="headwind", intensity=0.0)
-    v_wind, _, _ = simulate_truth(28.0, t, effect="headwind", intensity=10.0)
+    v_calm, _, _, _ = simulate_truth(28.0, t, effect="headwind", intensity=0.0)
+    v_wind, _, _, _ = simulate_truth(28.0, t, effect="headwind", intensity=10.0)
     assert v_wind[-1] < v_calm[-1] + 1e-6
+
+
+def test_cornering_costs_longitudinal_grip():
+    """Spending the friction budget laterally must lengthen the stop.
+
+    The physical invariant behind the friction ellipse: a tire cornering at
+    n = 0.6 has sqrt(1 - 0.36) = 80% of its longitudinal capacity left, so the
+    same braking input has to take longer. Asserting the ordering rather than
+    a number, so it stays a physics check and not a pinned output.
+    """
+    t = np.arange(0, 3.0, 0.01)
+    v_straight, _, _, n0 = simulate_truth(28.0, t, effect="corner", intensity=0.0)
+    v_corner,   _, _, n6 = simulate_truth(28.0, t, effect="corner", intensity=0.6)
+    assert np.all(n0 == 0.0) and np.allclose(n6, 0.6)
+    assert v_corner[-1] > v_straight[-1], (
+        "cornering must leave the car FASTER at the end of the same braking "
+        "event, because less longitudinal grip is available"
+    )
 
 
 @pytest.mark.slow
@@ -49,7 +70,8 @@ def test_no_method_is_broken_at_nominal():
     cells = run_sweep()
     nominal = [c for c in cells
                if (c.effect == "grade" and c.intensity == 0.0)
-               or (c.effect == "brake" and c.intensity == 0.01)]
+               or (c.effect == "brake" and c.intensity == 0.01)
+               or (c.effect == "corner" and c.intensity == 0.0)]
     assert nominal, "no nominal cells found"
     for c in nominal:
         assert c.rmse_norm < 0.05, (

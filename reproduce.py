@@ -27,18 +27,22 @@ from src.ml.pinn import (
     PacejkaNet,
     evaluate_curve,
     evaluate_curve_2d,
+    evaluate_curve_combined,
     evaluate_pacejka_curve,
     generate_dataset,
     generate_dataset_braking,
+    generate_dataset_combined,
     train_pacejka,
     train_pinn,
     train_pinn_2d,
+    train_pinn_combined,
 )
 from src.ml.train import FrictionNet
 from src.physics.wheel import (
     DEFAULTS,
     K_DRAG,
     PACEJKA_DRY,
+    friction_ellipse,
     mu_pacejka,
     pacejka_peak,
 )
@@ -443,6 +447,105 @@ def run_pinn_brake(seed: int = 0, epochs: int = 5000) -> None:
     torch.save(net.state_dict(), os.path.join("models", "pinn_mu_2d.pth"))
 
 
+def run_pinn_combined(seed: int = 0, epochs: int = 4000) -> None:
+    """Train the 2D PINN that factorises mu_x(s, n) = mu(s) * ellipse(n).
+
+    Combined slip: the tire has one friction budget and force spent cornering
+    is not available for stopping. The network is given slip and normalised
+    lateral utilisation and has to split the product into a tire curve and a
+    derating factor, without being told that the true factor is sqrt(1 - n^2).
+
+    The figure carries the identifiability story, which is the point of this
+    section. Two ablations, both run below:
+
+      * ANCHOR REACHABILITY. ellipse(0) = 1 is exact physics and it is the
+        only thing fixing the (shape, scale) split. Starve the data of
+        near-straight samples and the anchor pins a point the data never
+        visits -- the residual still fits, the recovered curve is wrong.
+      * NO SHAPE PRIOR. Unlike the brake-ramp net, this one needs none: an
+        exactly-true constraint does what a plausible-but-false one could not.
+        Turning the concavity prior on makes it worse, which is C3 again.
+    """
+    ds, meta = generate_dataset_combined(n_runs=16, t_final=4.0, seed=seed)
+    print("=== PINN (2D, cornering-aware): factorising mu(s)*ellipse(n) ===")
+    print(f"  ground truth   = Pacejka * sqrt(1 - n^2), n in "
+          f"[{meta['n_range'][0]:.2f}, {meta['n_range'][1]:.2f}]")
+    print(f"  samples        = {meta['n_samples']}")
+
+    net, history = train_pinn_combined(ds, epochs=epochs, seed=seed)
+    s, mu_hat, n_grid, e_hat = evaluate_curve_combined(net, s_max=0.3)
+    mu_truth = mu_pacejka(s, **PACEJKA_DRY)
+    e_truth = friction_ellipse(n_grid)
+
+    lo, hi = meta["s_range"]
+    in_range = (s >= lo) & (s <= hi)
+    mu_err = float(np.mean(np.abs(mu_hat[in_range] - mu_truth[in_range])))
+    nlo, nhi = meta["n_range"]
+    n_in = (n_grid >= nlo) & (n_grid <= nhi)
+    e_err = float(np.mean(np.abs(e_hat[n_in] - e_truth[n_in])))
+    peak_i = int(np.argmax(mu_hat))
+
+    # Ablation: same everything, but the fleet never brakes in a straight line.
+    ds_star, meta_star = generate_dataset_combined(
+        n_runs=16, t_final=4.0, seed=seed, n_floor_range=(0.35, 0.50))
+    net_star, _ = train_pinn_combined(ds_star, epochs=epochs, seed=seed)
+    s2, mu_star, _, _ = evaluate_curve_combined(net_star, s_max=0.3)
+    lo2, hi2 = meta_star["s_range"]
+    in2 = (s2 >= lo2) & (s2 <= hi2)
+    mu_err_star = float(np.mean(np.abs(mu_star[in2] - mu_pacejka(s2, **PACEJKA_DRY)[in2])))
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+    plt.style.use("dark_background")
+    fig.patch.set_facecolor("#0b0b0b")
+    for ax in axes:
+        ax.set_facecolor("#0b0b0b")
+        ax.grid(alpha=0.2)
+
+    axes[0].plot(s, mu_truth, color="#FFD166", linewidth=2.5, linestyle="--",
+                 label="Pacejka truth")
+    axes[0].plot(s, mu_hat, color="#00FF85", linewidth=2.5,
+                 label=f"PINN-C mu_theta(s)  |d_mu|={mu_err:.3f}")
+    axes[0].plot(s2, mu_star, color="#FF5C5C", linewidth=2.0, linestyle=":",
+                 label=f"never straight   |d_mu|={mu_err_star:.3f}")
+    axes[0].set_xlabel("slip ratio s")
+    axes[0].set_ylabel("mu")
+    axes[0].set_title("Recovered tire curve (factor 1)")
+    axes[0].legend(facecolor="#111", edgecolor="white", fontsize=8)
+
+    axes[1].plot(n_grid, e_truth, color="#FFD166", linewidth=2.5, linestyle="--",
+                 label="truth  sqrt(1 - n^2)")
+    axes[1].plot(n_grid, e_hat, color="#FF6B9D", linewidth=2.5,
+                 label=f"PINN-C ellipse_theta(n)  |d_e|={e_err:.3f}")
+    axes[1].axvspan(nlo, nhi, color="#00E5FF", alpha=0.08, label="data support")
+    axes[1].set_xlabel("lateral utilisation n = a_y / (g D)")
+    axes[1].set_ylabel("longitudinal derating")
+    axes[1].set_title("Recovered friction ellipse (factor 2)")
+    axes[1].legend(facecolor="#111", edgecolor="white", fontsize=8)
+
+    axes[2].plot(np.arange(len(history)) * 200, history, color="#00E5FF", linewidth=2)
+    axes[2].set_yscale("log")
+    axes[2].set_xlabel("epoch")
+    axes[2].set_ylabel("loss")
+    axes[2].set_title("Training")
+
+    plt.tight_layout()
+    out = os.path.join(RESULTS, "pinn_combined_recovery.png")
+    plt.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"  mean |d_mu(s)|          = {mu_err:.3f}")
+    print(f"  mean |d_ellipse(n)|     = {e_err:.3f}")
+    print(f"  recovered peak          = ({s[peak_i]:.3f}, {mu_hat[peak_i]:.3f})  "
+          f"true ({pacejka_peak(**PACEJKA_DRY)[0]:.3f}, "
+          f"{pacejka_peak(**PACEJKA_DRY)[1]:.3f})")
+    print(f"  ablation, never straight: mean |d_mu(s)| = {mu_err_star:.3f}  "
+          f"(anchor in the loss, absent from the data)")
+    print(f"  wrote = {out}")
+
+    os.makedirs("models", exist_ok=True)
+    torch.save(net.state_dict(), os.path.join("models", "pinn_mu_combined.pth"))
+
+
 def run_mismatch() -> None:
     """Model-mismatch sweep. Generates three figures:
 
@@ -454,18 +557,21 @@ def run_mismatch() -> None:
     """
     cells = run_sweep()
     methods = sorted({c.method for c in cells},
-                     key=lambda x: ["Batch", "EKF", "NN", "PINN", "PINN-B"].index(x.split()[0]))
+                     key=lambda x: ["Batch", "EKF", "NN", "PINN",
+                                    "PINN-B", "PINN-C"].index(x.split()[0]))
     effect_labels = {e.name: e.label for e in EFFECTS}
     effect_order = [e.name for e in EFFECTS]
 
     plt.style.use("dark_background")
-    colours = {"grade": "#FFD166", "headwind": "#00E5FF", "brake": "#FF6B9D"}
+    colours = {"grade": "#FFD166", "headwind": "#00E5FF", "brake": "#FF6B9D",
+               "corner": "#B388FF"}
     method_colours = {
         "Batch (SciPy)":         "#00FF85",
         "EKF":                   "#FFD166",
         "NN (FrictionNet)":      "#FF3B3B",
         "PINN":                  "#00E5FF",
         "PINN-B (brake-aware)":  "#FF6B9D",
+        "PINN-C (cornering-aware)": "#B388FF",
     }
 
     # --- Panel 1: per-method degradation curves ----------------------------
@@ -532,7 +638,9 @@ def run_mismatch() -> None:
     plt.close(fig2)
 
     # --- Panel 3: trajectory overlay at nominal vs worst grade -------------
-    methods_for_overlay = [m for m in methods if m != "PINN-B (brake-aware)"]
+    methods_for_overlay = [m for m in methods
+                           if m not in ("PINN-B (brake-aware)",
+                                        "PINN-C (cornering-aware)")]
     fig3, axes = plt.subplots(len(methods_for_overlay), 2,
                               figsize=(11, 2 * len(methods_for_overlay)),
                               sharex=True)
@@ -620,6 +728,8 @@ def main() -> None:
     ap.add_argument("--pinn", action="store_true")
     ap.add_argument("--pinn-brake", action="store_true",
                     help="train the 2D brake-aware PINN")
+    ap.add_argument("--pinn-combined", action="store_true",
+                    help="train the 2D cornering-aware PINN (combined slip)")
     ap.add_argument("--mismatch", action="store_true")
     ap.add_argument("--synthetic-only", action="store_true")
     ap.add_argument("--all", action="store_true")
@@ -639,6 +749,8 @@ def main() -> None:
         run_pinn()
     if args.pinn_brake or args.all:
         run_pinn_brake()
+    if args.pinn_combined or args.all:
+        run_pinn_combined()
     if args.mismatch or args.all:
         run_mismatch()
 

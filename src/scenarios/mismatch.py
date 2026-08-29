@@ -37,9 +37,10 @@ import torch
 
 from src.estimation.kalman import VehicleEKF
 from src.estimation.optimize import estimate
-from src.ml.pinn import MuNet, MuNet2D
+from src.ml.pinn import MuNet, MuNet2D, MuNetCombined
 from src.ml.train import FrictionNet
-from src.physics.wheel import DEFAULTS, K_DRAG, PACEJKA_DRY, mu_pacejka, ramp_slip
+from src.physics.wheel import (DEFAULTS, K_DRAG, PACEJKA_DRY, friction_ellipse,
+                               mu_pacejka, ramp_slip)
 from src.simulation.run_sim import simulate as simple_simulate
 
 
@@ -60,18 +61,20 @@ EFFECTS = (
     Effect("grade",    "road grade (rad)",  (0.0, 0.02, 0.05, 0.08, 0.12),       "rad"),
     Effect("headwind", "headwind (m/s)",     (0.0, 3.0, 6.0, 10.0, 15.0),         "m/s"),
     Effect("brake",    "brake ramp tau (s)", (0.01, 0.15, 0.3, 0.5, 0.8),         "s"),
+    Effect("corner",   "lateral utilisation", (0.0, 0.2, 0.4, 0.6, 0.75),          "-"),
 )
 
 
 def simulate_truth(v0: float, t: np.ndarray, *, effect: str, intensity: float,
                    s_schedule: Callable[[float], float] | None = None,
                    pacejka: dict | None = None
-                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Slip-aware forward roll with one unmodeled effect active.
 
-    Returns `(v_truth_clean, s_traj, p_traj)`. The simple-model fitters never
-    see s_traj/p_traj, only noisy v. The PINN sees s_traj; the brake-aware
-    PINN also sees p_traj (normalised brake pressure).
+    Returns `(v_truth_clean, s_traj, p_traj, n_traj)`. The simple-model fitters
+    never see the trajectories, only noisy v. The PINN sees s_traj; the
+    brake-aware PINN also sees p_traj (normalised brake pressure); the
+    cornering-aware PINN also sees n_traj (lateral utilisation).
     """
     if s_schedule is None:
         s_schedule = ramp_slip(s_peak=0.16, ramp=0.25, hold_start=0.0)
@@ -86,11 +89,19 @@ def simulate_truth(v0: float, t: np.ndarray, *, effect: str, intensity: float,
     grade = intensity if effect == "grade" else 0.0
     v_w   = intensity if effect == "headwind" else 0.0
     tau   = intensity if effect == "brake" else 1e-4   # ~instantaneous
+    # Sustained cornering: a constant share of the friction budget is spent
+    # laterally for the whole event, so the longitudinal coefficient is
+    # derated by the friction ellipse. Constant rather than time-varying to
+    # match how grade and headwind are applied -- the brake ramp is the one
+    # effect here that varies within a run.
+    n_lat = intensity if effect == "corner" else 0.0
+    ellipse = float(friction_ellipse(n_lat))
 
     v = np.zeros_like(t)
     v[0] = v0
     s_traj = np.zeros_like(t)
     p_traj = np.zeros_like(t)
+    n_traj = np.full_like(t, n_lat)
     for i in range(1, len(t)):
         ti = t[i - 1]
         s_traj[i - 1] = s_schedule(ti)
@@ -98,7 +109,7 @@ def simulate_truth(v0: float, t: np.ndarray, *, effect: str, intensity: float,
 
         def rhs(vi: float, tt: float) -> float:
             si = s_schedule(tt)
-            mu = mu_pacejka(si, **pacejka)
+            mu = mu_pacejka(si, **pacejka) * ellipse
             ramp = 1.0 - np.exp(-tt / max(tau, 1e-9))
             F_fric_per_m = mu * g * np.cos(grade) * ramp
             F_drag_per_m = (k / m) * (vi + v_w) ** 2
@@ -112,7 +123,7 @@ def simulate_truth(v0: float, t: np.ndarray, *, effect: str, intensity: float,
         v[i] = max(v[i - 1] + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4), 0.0)
     s_traj[-1] = s_schedule(t[-1])
     p_traj[-1] = 1.0 - np.exp(-t[-1] / max(tau, 1e-9))
-    return v, s_traj, p_traj
+    return v, s_traj, p_traj, n_traj
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +131,7 @@ def simulate_truth(v0: float, t: np.ndarray, *, effect: str, intensity: float,
 # (label, v_predicted, mu_effective_scalar)
 # ---------------------------------------------------------------------------
 
-def fit_batch(t, v_obs, s_traj, p_traj):
+def fit_batch(t, v_obs, s_traj, p_traj, n_traj):
     dt = float(t[1] - t[0])
     v0 = float(v_obs[0])
     mu_est, k_est = estimate(v_obs, v0, t, dt)
@@ -128,7 +139,7 @@ def fit_batch(t, v_obs, s_traj, p_traj):
     return ("Batch (SciPy)", v_pred, float(mu_est))
 
 
-def fit_ekf(t, v_obs, s_traj, p_traj):
+def fit_ekf(t, v_obs, s_traj, p_traj, n_traj):
     dt = float(t[1] - t[0])
     v0 = float(v_obs[0])
     ekf = VehicleEKF(mu_init=0.5, v_init=v0)
@@ -142,7 +153,8 @@ def fit_ekf(t, v_obs, s_traj, p_traj):
     return ("EKF", v_pred, mu_est)
 
 
-def fit_nn(t, v_obs, s_traj, p_traj, weights_path: str = "models/friction_net.pth"):
+def fit_nn(t, v_obs, s_traj, p_traj, n_traj,
+           weights_path: str = "models/friction_net.pth"):
     dt = float(t[1] - t[0])
     v0 = float(v_obs[0])
     window_size = 50
@@ -157,7 +169,8 @@ def fit_nn(t, v_obs, s_traj, p_traj, weights_path: str = "models/friction_net.pt
     return ("NN (FrictionNet)", v_pred, mu_est)
 
 
-def fit_pinn(t, v_obs, s_traj, p_traj, weights_path: str = "models/pinn_mu.pth"):
+def fit_pinn(t, v_obs, s_traj, p_traj, n_traj,
+             weights_path: str = "models/pinn_mu.pth"):
     """1D PINN: mu_theta(s). Forward-rolls slip-aware model (no brake ramp)."""
     dt = float(t[1] - t[0])
     v0 = float(v_obs[0])
@@ -180,7 +193,7 @@ def fit_pinn(t, v_obs, s_traj, p_traj, weights_path: str = "models/pinn_mu.pth")
     return ("PINN", v_pred, mu_eff)
 
 
-def fit_pinn_brake(t, v_obs, s_traj, p_traj,
+def fit_pinn_brake(t, v_obs, s_traj, p_traj, n_traj,
                    weights_path: str = "models/pinn_mu_2d.pth"):
     """2D PINN: mu_theta(s) * ramp_theta(p). Forward-rolls with both inputs."""
     dt = float(t[1] - t[0])
@@ -206,7 +219,39 @@ def fit_pinn_brake(t, v_obs, s_traj, p_traj,
     return ("PINN-B (brake-aware)", v_pred, mu_eff)
 
 
-METHODS = (fit_batch, fit_ekf, fit_nn, fit_pinn, fit_pinn_brake)
+def fit_pinn_combined(t, v_obs, s_traj, p_traj, n_traj,
+                      weights_path: str = "models/pinn_mu_combined.pth"):
+    """2D PINN: mu_theta(s) * ellipse_theta(n). Sees the lateral channel.
+
+    Same caveat as PINN-B, and for the same reason: n_traj here is built from
+    the ground-truth cornering intensity, so this is partly more information
+    rather than a better algorithm. Lateral acceleration is a real IMU signal,
+    but a real one is noisy and this one is not.
+    """
+    dt = float(t[1] - t[0])
+    v0 = float(v_obs[0])
+    net = MuNetCombined()
+    net.load_state_dict(torch.load(weights_path, map_location="cpu", weights_only=True))
+    net.eval()
+
+    g = DEFAULTS["g"]
+    k_over_m = DEFAULTS["k"] / DEFAULTS["m"]
+    s_tensor = torch.tensor(s_traj, dtype=torch.float32)
+    n_tensor = torch.tensor(n_traj, dtype=torch.float32)
+    with torch.no_grad():
+        mu_eff_traj = net(s_tensor, n_tensor).numpy().astype(np.float64)
+
+    v_pred = np.zeros_like(t)
+    v_pred[0] = v0
+    for i in range(1, len(t)):
+        a = -mu_eff_traj[i - 1] * g - k_over_m * v_pred[i - 1] ** 2
+        v_pred[i] = max(v_pred[i - 1] + a * dt, 0.0)
+    active = s_traj > 1e-4
+    mu_eff = float(np.average(mu_eff_traj[active])) if np.any(active) else 0.0
+    return ("PINN-C (cornering-aware)", v_pred, mu_eff)
+
+
+METHODS = (fit_batch, fit_ekf, fit_nn, fit_pinn, fit_pinn_brake, fit_pinn_combined)
 
 
 # ---------------------------------------------------------------------------
@@ -236,13 +281,13 @@ def run_sweep(*, dt: float = 0.01, t_final: float = 3.5, v0: float = 28.0,
 
     for effect in EFFECTS:
         for intensity in effect.intensities:
-            v_truth, s_traj, p_traj = simulate_truth(
+            v_truth, s_traj, p_traj, n_traj = simulate_truth(
                 v0, t, effect=effect.name, intensity=intensity
             )
             v_obs = v_truth + rng.normal(0.0, noise, size=len(t))
             for method in methods:
                 try:
-                    label, v_pred, mu_est = method(t, v_obs, s_traj, p_traj)
+                    label, v_pred, mu_est = method(t, v_obs, s_traj, p_traj, n_traj)
                 except FileNotFoundError:
                     continue
                 rmse = float(np.sqrt(np.mean((v_pred - v_truth) ** 2)))

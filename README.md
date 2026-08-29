@@ -18,7 +18,7 @@ cd vehicle-dynamics-estimation
 python -m venv venv && source venv/bin/activate      # venv\Scripts\activate on Windows
 pip install -r requirements.txt
 python reproduce.py --all                            # regenerates every figure below
-pytest                                               # 19 fast tests; add -m slow for the full suite
+pytest                                               # 22 fast tests; add -m slow for the full suite
 ```
 
 ---
@@ -31,6 +31,8 @@ pytest                                               # 19 fast tests; add -m slo
 | Grey-box Pacejka recovery, mean \|Δμ\| | **0.007** | [PINN](#3-pinn-discovering-the-pacejka-curve-from-data) |
 | Function-free PINN, mean \|Δμ\| | **0.013** | [PINN](#3-pinn-discovering-the-pacejka-curve-from-data) |
 | Function-free PINN, recovered peak | **(0.124, 0.890)** vs true (0.127, 0.900) | [PINN](#3-pinn-discovering-the-pacejka-curve-from-data) |
+| Combined-slip PINN, mean \|Δμ\| / \|Δellipse\| | **0.005** / **0.004** | [Combined slip](#3c-combined-slip-the-friction-ellipse-munetcombined) |
+| Combined-slip PINN-C, worst-case cornering RMSE | **2.0 %** of $v_0$ (vs 19.9 % PINN, 19.4 % PINN-B) | [Mismatch](#4-model-mismatch-which-method-when) |
 | Brake-aware PINN-B, worst-case brake-ramp RMSE | **4.4 %** of $v_0$ (vs 16.9 % EKF, 17.8 % PINN, 21.3 % MLP) | [Mismatch](#4-model-mismatch-which-method-when) |
 | C++ EKF latency | **15 ns** median, 37 ns p99 (Apple M-series) | [C++ port](#6-c-edge-port) |
 | C++ binary, deps, allocations | 35 KB, **0** external deps, **0** runtime allocations | [C++ port](#6-c-edge-port) |
@@ -76,7 +78,7 @@ $$\mu(s) \;=\; D \cdot \sin\!\Big( C \cdot \arctan\!\big( B s - E (B s - \arctan
 
 Unlike a saturating exponential, this curve **rises, peaks near $s \approx 0.13$, then falls** as the tire transitions from sticking to sliding. That fall is not a detail: left of the peak the tire is self-correcting (more slip gives more force), while right of it $d\mu/ds < 0$ and the loop inverts — more slip gives less force, the wheel decelerates faster than the vehicle, and slip grows further. That is wheel lock, an open-loop instability, and holding the operating point just left of the peak is what an ABS controller exists to do.
 
-Two networks recover this curve from the same noisy braking data, illustrating the cost of prior strength:
+Two networks recover this curve from the same noisy braking data, illustrating the cost of prior strength; a third (§3c) adds the lateral axis:
 
 ![PINN recovery](results/pinn_recovery.png)
 
@@ -137,11 +139,55 @@ If you know your tire family, take the grey-box every time — it is cheaper, be
 
 The trained weights export to `models/pinn_mu.pth` and `models/pacejka_net.pth`; the C++ port loads `pinn_mu.pth` for edge inference.
 
+### 3c. Combined slip: the friction ellipse (`MuNetCombined`)
+
+A tire has one contact patch and one friction budget, and force spent turning is not available for stopping. The standard lumped model of that trade is the **friction ellipse**: writing $n = a_y / (g D)$ for the share of the budget already spent laterally, the longitudinal coefficient that remains is
+
+$$\mu_x(s, n) \;=\; \mu(s)\,\sqrt{1 - n^2}.$$
+
+`MuNetCombined` is handed $(s, n)$ and has to factorise that product back into a tire curve and a derating factor, without being told the second factor is $\sqrt{1-n^2}$.
+
+![Combined-slip PINN recovery](results/pinn_combined_recovery.png)
+
+| | value |
+|---|---:|
+| Architecture | two heads, $\mu(s)$ and $\mathrm{ellipse}(n)$, 1 → 32 → 32 → 1 each |
+| Training | 4,371 collocation points, 16 runs, 4,000 epochs |
+| Constraints | $\mu(0) = 0$ and $\mathrm{ellipse}(0) = 1$ — both physics, no shape prior |
+| mean $\lvert\Delta\mu(s)\rvert$ | **0.005** |
+| mean $\lvert\Delta\,\mathrm{ellipse}(n)\rvert$ | **0.004** |
+| Recovered peak | $(0.128,\ 0.891)$ — true $(0.127,\ 0.900)$ |
+
+At 0.005 that is below both the function-free 1D net's 0.013 and the grey-box `PacejkaNet`'s 0.007, without being told the curve family — but it is not a like-for-like win, because this net sees strictly more. The second input is information, not just capacity: the same curve observed at several derating levels is better determined than one observed at a single level. The fair reading is that the lateral channel pays for itself, not that free-form beats grey-box.
+
+#### What actually makes it identifiable
+
+$\mu(s)\cdot\mathrm{ellipse}(n)$ admits a family of (shape, scale) splits that fit the ODE residual equally well, so something has to choose among them. Each row below is three seeds, everything else held fixed:
+
+| ablation | mean $\lvert\Delta\mu\rvert$ | recovered peak |
+|---|---:|---|
+| **as shipped** | **0.005** | 0.128 ✓ |
+| anchor weight 50 → 2 | 0.194 | grid edge |
+| data never straight ($n \geq 0.35$) | 0.208 | grid edge |
+| $n$ tied rigidly to $s$ (collinear) | 0.124 | grid edge |
+| concavity prior on | 0.062 | grid edge |
+| ramp-up-only runs (corr 0.70) | 0.004 | 0.125 ✓ |
+
+**$\mathrm{ellipse}(0) = 1$ is the whole story, and it has to hold in two places.** In the loss, weighted at 50 rather than 2 — it is an exact identity, not a soft preference, and at weight 2 the optimiser simply pays the penalty, settles at $\mathrm{ellipse}(0) \approx 0.83$, and lets $\mu(s)$ saturate against its cap while the *product* still fits the data to 0.011. And in the **data**: pin the anchor at $n = 0$ but supply no near-straight samples and it fails just as badly, because the pin now constrains a point the samples never visit. Training longer rescues neither — 8,000 epochs reaches $\mathrm{ellipse}(0) \approx 0.98$ and still recovers the wrong curve. The split is decided early, so the anchor has to bind from the start.
+
+**A prediction that was wrong, kept here because it was wrong.** I expected coverage of the $(s,n)$ plane to be the binding constraint — the intuition that a product of two functions must be observed off its diagonal to be separable. It is not. Ramp-up-only data, where every high-slip sample is also a high-lateral one and $\mathrm{corr}(s,n) = 0.70$, recovers the split to 0.004. Only *exact* collinearity breaks it. The mixed ramp directions in the dataset generator are margin against that degenerate case, not the reason the method works, and the first version of this section claimed otherwise.
+
+**The prior is still the wrong tool.** Turning on the concavity prior — the one `MuNet2D` genuinely needs for its brake-ramp factorisation — makes this net *worse*, 0.005 → 0.062, and pushes the peak back to the grid edge. [C3](#c3--a-shape-prior-that-penalised-the-ground-truth) from the other direction: an exactly-true constraint did what a plausible-but-false one could not.
+
+**What it means operationally.** You cannot calibrate combined-slip tire capacity from cornering data alone. A fleet that only ever brakes mid-corner yields data its own residual fits perfectly and a tire curve wrong by 0.2 in μ, with no diagnostic that anything is off. The straight-line braking events are what fix the scale.
+
+**What this is not.** A lumped single-track approximation, not a combined-slip Pacejka model: it derates the whole curve by one scalar rather than solving the $(\kappa, \alpha)$ force surface with the $G_{x\alpha}$ / $G_{y\kappa}$ weighting functions of Pacejka (2002) §4.3.2. Lateral demand is an exogenous input rather than a state — no bicycle model, no yaw dynamics, no load transfer. The Roadmap prices each of those.
+
 ---
 
 ## 4. Model mismatch: which method, when?
 
-Ground-truth trajectories are generated from the **full** Pacejka slip-aware model and corrupted with one unmodeled effect at a time — road grade (gravity), headwind (drag bias), brake-force ramp (time-varying $\mu_{\text{eff}}$). Each estimator is then fed the noisy trace, runs its own (often incorrect) inverse model, and its *predicted* velocity trajectory is scored against clean ground truth.
+Ground-truth trajectories are generated from the **full** Pacejka slip-aware model and corrupted with one unmodeled effect at a time — road grade (gravity), headwind (drag bias), brake-force ramp (time-varying $\mu_{\text{eff}}$), sustained cornering (friction-ellipse derating). Each estimator is then fed the noisy trace, runs its own (often incorrect) inverse model, and its *predicted* velocity trajectory is scored against clean ground truth.
 
 This is not a leaderboard — it is the operating envelope of each method.
 
@@ -149,13 +195,16 @@ This is not a leaderboard — it is the operating envelope of each method.
 
 ### 4a. Worst-case mismatch (RMSE / $v_0$, %)
 
-| Method | grade (0.12 rad) | headwind (15 m/s) | brake ramp (τ = 0.8 s) | mean |
-|---|---:|---:|---:|---:|
-| **Batch (SciPy)** | 0.8 % | 1.0 % | **1.6 %** | **0.7 %** |
-| EKF | 2.8 % | 2.9 % | 16.9 % | 3.7 % |
-| NN (FrictionNet) | 4.8 % | 2.4 % | 21.3 % | 5.6 % |
-| PINN (1D, function-free) | 6.5 % | 1.9 % | 17.8 % | 3.9 % |
-| **PINN-B (brake-aware, 2D)** | 7.0 % | 2.3 % | **4.4 %** | 3.0 % |
+| Method | grade (0.12 rad) | headwind (15 m/s) | brake ramp (τ = 0.8 s) | cornering (n = 0.75) | mean |
+|---|---:|---:|---:|---:|---:|
+| **Batch (SciPy)** | 0.8 % | 1.0 % | **1.6 %** | 0.5 % | **0.6 %** |
+| EKF | 2.8 % | 2.9 % | 16.9 % | 1.8 % | 3.1 % |
+| NN (FrictionNet) | 4.8 % | 2.4 % | 21.3 % | 3.0 % | 4.6 % |
+| PINN (1D, function-free) | 6.5 % | 1.9 % | 17.8 % | 19.9 % | 4.8 % |
+| **PINN-B (brake-aware, 2D)** | 7.0 % | 2.3 % | **4.4 %** | 19.4 % | 4.0 % |
+| **PINN-C (cornering-aware, 2D)** | 6.2 % | 1.5 % | 18.1 % | **2.0 %** | 3.1 % |
+
+The means moved against earlier versions of this table because cornering is a fourth column, not because any method changed.
 
 ![Per-method degradation curves](results/mismatch_per_method.png)
 
@@ -165,13 +214,13 @@ The brake ramp models hydraulic / mechanical lag in building brake force: $F_{\t
 
 ![Brake-ramp degradation](results/mismatch_brake_curve.png)
 
-| τ (s) | Batch | EKF | NN | PINN | **PINN-B** |
-|---:|---:|---:|---:|---:|---:|
-| 0.01 (normal brakes) | 0.7 % | 1.2 % | 3.0 % | 0.4 % | 0.7 % |
-| 0.15 (cold pads) | 0.5 % | 3.4 % | 3.4 % | 0.5 % | 4.0 % |
-| 0.30 (worn hydraulics) | 1.2 % | 5.5 % | 14.9 % | 5.4 % | 3.3 % |
-| 0.50 (serious fault) | 1.5 % | 12.9 % | 19.4 % | 11.0 % | 3.4 % |
-| **0.80 (near-failure)** | **1.6 %** | **16.9 %** | **21.3 %** | **17.8 %** | **4.4 %** |
+| τ (s) | Batch | EKF | NN | PINN | **PINN-B** | PINN-C |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.01 (normal brakes) | 0.7 % | 1.2 % | 3.0 % | 0.4 % | 0.7 % | 0.4 % |
+| 0.15 (cold pads) | 0.5 % | 3.4 % | 3.4 % | 0.5 % | 4.0 % | 0.6 % |
+| 0.30 (worn hydraulics) | 1.2 % | 5.5 % | 14.9 % | 5.4 % | 3.3 % | 5.7 % |
+| 0.50 (serious fault) | 1.5 % | 12.9 % | 19.4 % | 11.0 % | 3.4 % | 11.3 % |
+| **0.80 (near-failure)** | **1.6 %** | **16.9 %** | **21.3 %** | **17.8 %** | **4.4 %** | 18.1 % |
 
 Every online method degrades sharply as the ramp lengthens except **PINN-B**, which factorises $\mu_{\text{eff}}(s, p) = \mu_\theta(s) \cdot \mathrm{ramp}_\theta(p)$ where $p \in [0,1]$ is normalised brake pressure, and holds at ~4 % across the full sweep.
 
@@ -179,13 +228,32 @@ Every online method degrades sharply as the ramp lengthens except **PINN-B**, wh
 
 **Caveat, stated plainly:** PINN-B receives the brake-pressure trajectory as an input, and in this harness that trajectory is constructed from the ground-truth τ. The 1D PINN likewise receives the exact, noiseless slip trajectory, while Batch, EKF and the MLP see only noisy velocity. So this comparison is partly *more information* against *a different algorithm*. The defensible claim is narrower than the table suggests and still worth making: **adding the brake-pressure channel fixes brake-lag mismatch, and brake pressure is a real signal already on the CAN bus.** The 4.4 % figure is a best case with a noiseless, perfectly time-aligned pressure trace; degrading that signal until the advantage disappears is the obvious next experiment.
 
-### 4c. How to read this map
+### 4c. Cornering degradation — and why an extra channel is not general robustness
+
+| n = a_y / (gD) | Batch | EKF | NN | PINN | PINN-B | **PINN-C** |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.00 (straight) | 0.1 % | 1.4 % | 0.4 % | 1.9 % | 2.4 % | 1.6 % |
+| 0.20 | 0.5 % | 1.5 % | 2.5 % | 0.6 % | 0.2 % | 0.1 % |
+| 0.40 | 0.2 % | 1.0 % | 1.4 % | 2.7 % | 2.2 % | 2.0 % |
+| 0.60 | 0.5 % | 1.2 % | 2.1 % | 11.3 % | 10.8 % | **0.2 %** |
+| **0.75 (hard cornering)** | 0.5 % | 1.8 % | 3.0 % | **19.9 %** | **19.4 %** | **1.2 %** |
+
+Two things worth reading off this.
+
+**The PINNs are the worst methods here, and it is the same structural reason they are worst on road grade.** Batch and the EKF hold near the noise floor because sustained cornering is a *constant multiplicative* derating, which folds straight into their free μ — biased parameter, accurate trajectory. $\mu_\theta(s)$ has no such slack: it is pinned by the slip input and has nowhere to put a force that does not depend on slip. Committing to more physics again costs the slack to absorb physics you did not model.
+
+**Adding a channel buys robustness to that effect, not robustness in general.** PINN-B carries brake pressure and is still 19.4 % under cornering; PINN-C carries lateral utilisation and is still 18.1 % under the brake ramp. Each is blind in exactly the axis the other sees. The lesson is not that 2D nets are more robust than 1D ones — it is that instrumenting the specific effect you care about fixes that effect and nothing else, which is an argument about sensor selection rather than estimator sophistication.
+
+**Same caveat as PINN-B, for the same reason.** PINN-C receives the lateral-utilisation trajectory as an input, and in this harness it is built from the ground-truth cornering intensity — noiseless and perfectly time-aligned. Lateral acceleration is a real IMU signal, but a real one is neither. This is partly *more information* against *a different algorithm*, and the honest claim is the narrow one: the friction-ellipse derating is learnable from braking data when the lateral channel is available.
+
+### 4d. How to read this map
 
 - **Offline parameter ID → Batch.** It carries $k_{\text{drag}}$ as a free parameter that absorbs structural error, so it stays near the noise floor under all three effects. It also has one more degree of freedom than the online methods, which is worth remembering before reading its win as purely methodological — though note (see Roadmap) that handing the EKF the same extra parameter recovers only part of the gap, and does so by absorbing error rather than by identifying drag.
 - **Online state tracking → EKF.** It holds 2.8 % under grade and 2.9 % under headwind: an unmodeled *constant* force gets folded into μ, and the predicted trajectory stays accurate even though the parameter is now biased. Its specific weakness is time-varying friction, where it reaches 16.9 %.
 - **One-shot inference on familiar distributions → MLP.** The control condition, and the most brittle. FrictionNet trains on constant-μ, Euler-integrated data and is tested against Pacejka slip-aware RK4 truth — it is a distribution-shift demonstration, not a fair competitor.
-- **Function-free recovery of the tire curve → PINN.** Best-in-class at recovering $\mu(s)$ itself (§3a), but note it is the *worst* method on road grade at 6.5 %. This is structural: a constant-μ estimator has a free scalar to absorb gravity into, whereas $\mu_\theta(s)$ is pinned by the slip input and has nowhere to put a force that does not depend on slip. **Committing to more physics costs you the slack to absorb physics you did not model.**
+- **Function-free recovery of the tire curve → PINN.** Best-in-class at recovering $\mu(s)$ itself (§3a), but note it is the *worst* method on road grade at 6.5 % and on cornering at 19.9 %. This is structural: a constant-μ estimator has a free scalar to absorb gravity into, whereas $\mu_\theta(s)$ is pinned by the slip input and has nowhere to put a force that does not depend on slip (§4c shows the same mechanism under cornering). **Committing to more physics costs you the slack to absorb physics you did not model.**
 - **Time-varying friction → PINN-B.** Adding the right *second input* collapses the worst-case brake-ramp error by 4× without any other change — an argument about sensing, not about estimator sophistication.
+- **Combined slip → PINN-C.** The same move on a different axis: lateral utilisation as a second input takes worst-case cornering error from 19.9 % to 2.0 %. It also recovers the friction ellipse itself to 0.004 (§3c), which the mismatch column alone would not tell you.
 
 ![Trajectory overlay](results/mismatch_trajectories.png)
 
@@ -290,7 +358,7 @@ Effect on the mismatch study (mean RMSE/$v_0$ over all 15 cells):
 
 The PINN sections of `reproduce.py` came out byte-identical before and after, because they already used the correct constant — only the two methods that were wrong moved. There is now a single `K_DRAG` in `wheel.py`, and no literal drag value survives anywhere in the repo.
 
-**Two conclusions reversed.** The EKF is not fragile under model mismatch — the earlier "category error" framing was an artifact. And the PINNs are now the *worst* methods on road grade, for the structural reason given in §4c.
+**Two conclusions reversed.** The EKF is not fragile under model mismatch — the earlier "category error" framing was an artifact. And the PINNs are now the *worst* methods on road grade, for the structural reason given in §4d.
 
 ### C2 — The C++ PINN applied the wrong activation scale
 
@@ -365,7 +433,7 @@ src/
 └── visualization/  # plotting
 cpp/                # header-only allocation-free C++17 port
 tools/              # benchmark + parity + weight-export scripts
-tests/              # pytest suite (19 fast, 4 slow)
+tests/              # pytest suite (22 fast, 4 slow)
 data/               # sample telemetry CSV
 results/            # generated figures (regenerated by reproduce.py)
 figures/            # duplicate of the synthetic-benchmark figure, kept for older links
@@ -385,12 +453,15 @@ models/             # exported PyTorch weights
 - [x] PINN (`MuNet`) — recovers the curve function-free to mean 0.013
 - [x] Grey-box PINN (`PacejkaNet`) — recovers $(B,C,D,E)$ to 0.007 mean
 - [x] Brake-aware PINN-B — 2D factorisation, holds ~4 % under brake-ramp mismatch
+- [x] Combined-slip PINN-C — friction-ellipse derating recovered to 0.004, worst-case cornering error 19.9 % → 2.0 %
 - [x] Model-mismatch study mapping where each method breaks
 - [x] C++ edge port: header-only, 0 deps, 0 allocations, parity to $10^{-9}$
 - [x] Single-source drag constant + parity assertion against the C++ port
-- [ ] Re-run the mismatch study with every method on *equal information* — noisy derived slip, lagged noisy brake pressure
+- [ ] Re-run the mismatch study with every method on *equal information* — noisy derived slip, lagged noisy brake pressure, noisy lateral acceleration. Both PINN-B and PINN-C currently receive their second channel noiseless and perfectly time-aligned, built from the ground-truth intensity; degrading each until the advantage disappears is the experiment that would turn §4a into a fair comparison rather than an informative one
 - [x] ~~Augment the EKF state to $[v, \mu, k]$~~ — **tried, and it does not do what it looks like it should.** Prototyped as a 3-state filter: $k$ is effectively unobservable from this data. Starting from the true value it drifts to $1.06\times10^{-3}$ (4× high) with $\sigma_k = 8.1\times10^{-3}$ — the uncertainty is 8× the estimate. Starting from the old 75×-wrong prior it does **not** self-correct, ending at $1.4\times10^{-2}$ with 17.7 % replay RMSE. The reason is in the physics: at road speeds drag is ~2 % of the deceleration, so the velocity innovation carries almost no information about $k$. Mean error over the mismatch sweep moves 3.7 % → 3.6 %, i.e. nothing. Worst-case does improve (16.9 % → 12.7 %, concentrated in the brake-ramp column), but that is the extra parameter acting as a *slack variable* absorbing structural error — the same mechanism that flatters the batch fit — not drag being identified. Not worth shipping a filter that reports a drag coefficient nobody should trust.
 - [ ] Close the loop: wheel rotational dynamics + slip observer
+- [ ] **Lateral dynamics: bicycle model + $F_y(\alpha)$ identification.** ~3 weeks, and the C++ port is what pays for it. The physics is nearly free — `mu_pacejka` transfers to $F_y(\alpha)$ verbatim with $\alpha$ substituted for $s$, and `PacejkaNet` becomes $(B_y, C_y, D_y, E_y)$. The estimation is not. State goes from $[v, \mu]$ to $[v_x, v_y, r, \mu]$; measurements from velocity alone to IMU ($a_x$, $a_y$, yaw rate); and $S = P_{00} + R$ stops collapsing to a scalar, so the filter needs a real inverse and the hand-rolled 2×2 in [`cpp/include/vd/matrix.hpp`](cpp/include/vd/matrix.hpp), the zero-allocation claim and the 15 ns figure all have to be re-established. Needs a lateral excitation library too (step steer, slalom, skidpad ramp): straight-line braking excites longitudinal slip and nothing else. **Expect a negative result on peak lateral μ.** Cornering stiffness is observable in the linear region, but normal driving rarely exceeds ~0.3 g laterally, so $D_y$ is pure extrapolation — identifying it needs limit-handling data, which makes it a data-collection problem rather than an estimator one. Worth writing up as such either way, in the shape of the augmented-EKF entry above
+- [ ] **Full combined-slip Pacejka.** ~6–10 weeks. The $G_{x\alpha}$ / $G_{y\kappa}$ weighting functions of Pacejka (2002) §4.3.2 in place of §3c's lumped scalar derating, plus per-axle normal load transfer — which stops being ignorable the moment longitudinal and lateral demand are both live, since braking shifts load forward and changes each axle's capacity. Every estimator in §4 then needs a lateral-capable variant, so the mismatch grid multiplies rather than adds. This is the version that would let §3c drop its "one scalar derating" caveat, and it is a thesis chapter rather than a weekend
 - [ ] Jetson aarch64 benchmarks; NEON / SVE intrinsics; fp16/int8 quantisation
 - [ ] Joseph-form covariance update; drop `-ffast-math` for the shipping path
 

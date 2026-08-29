@@ -1,7 +1,8 @@
 """Physics-Informed Networks for tire-friction system identification.
 
-Three networks are exposed, illustrating a spectrum from "function-free" to
-"grey-box parametric":
+Four networks are exposed. The first three illustrate a spectrum from
+"function-free" to "grey-box parametric"; the fourth adds a second physical
+axis rather than moving along that spectrum:
 
   * `MuNet`       : s -> mu, free-form MLP, no shape prior by default.
                     Recovers Pacejka shape (rise, peak, fall) without being
@@ -14,6 +15,11 @@ Three networks are exposed, illustrating a spectrum from "function-free" to
                     plugged into the analytic Pacejka magic formula. Same
                     ODE-residual loss; no free-form MLP. Industry-standard
                     parameter ID -- the cleanest recovery the data allows.
+  * `MuNetCombined`: (s, n) -> mu_x, factorised mu(s) * ellipse(n).
+                    Combined slip -- the tire's friction budget is shared
+                    between cornering and braking. Needs no shape prior,
+                    because ellipse(0) = 1 is an exact identity that pins the
+                    factorisation where MuNet2D's scale convention cannot.
 
 The structural-prior story is the point of having both `MuNet` and
 `PacejkaNet` in the repo. Three shape priors were tried on MuNet and all
@@ -37,14 +43,18 @@ Layering `PacejkaNet` alongside `MuNet` still makes that cost explicit:
 MuNet rediscovers the shape, PacejkaNet only fits 4 scalars.
 
 Pipeline:
-  generate_dataset(...)         : roll forward Pacejka truth + sensor noise
-  generate_dataset_braking(...) : same, with a brake-ramp time constant tau
-  MuNet / MuNet2D / PacejkaNet  : the networks
+  generate_dataset(...)          : roll forward Pacejka truth + sensor noise
+  generate_dataset_braking(...)  : same, with a brake-ramp time constant tau
+  generate_dataset_combined(...) : same, with a lateral-utilisation channel
+  MuNet / MuNet2D / PacejkaNet /
+      MuNetCombined              : the networks
   pinn_loss / pinn_loss_2d /
-      pacejka_loss              : residual + structural priors
+      pinn_loss_combined /
+      pacejka_loss               : residual + structural priors
   train_pinn / train_pinn_2d /
-      train_pacejka             : Adam loops
-  evaluate_curve(_2d)           : sample on a grid for plotting
+      train_pinn_combined /
+      train_pacejka              : Adam loops
+  evaluate_curve(_2d/_combined)  : sample on a grid for plotting
 """
 
 from __future__ import annotations
@@ -555,3 +565,286 @@ def evaluate_pacejka_curve(net: PacejkaNet, n: int = 200, s_max: float = 0.3
     with torch.no_grad():
         mu = net(torch.tensor(s, dtype=torch.float32)).numpy()
     return s, mu
+
+
+# ---------------------------------------------------------------------------
+# Combined slip: mu_x(s, n) = mu(s) * ellipse(n)
+# ---------------------------------------------------------------------------
+#
+# Same factorised shape as MuNet2D, a different second axis: normalised
+# lateral utilisation n = a_y / (g D) instead of brake pressure. The physics
+# is in `src/physics/wheel.py::friction_ellipse`; the truth is
+# ellipse(n) = sqrt(1 - n^2), which the network is not told.
+#
+# The identifiability story differs from the brake case in one useful way.
+# `pinn_loss_2d` pins ramp(1) ~ 1, which is a *convention* -- nothing physical
+# says full brake pressure means undiminished friction, it is just where the
+# scale is chosen to sit. Here the anchor is physics: at zero lateral demand
+# the tire's whole budget is available longitudinally, so ellipse(0) = 1
+# exactly. That is a stronger constraint, and it is why this net needs no
+# shape prior on mu(s) while the brake-ramp net does.
+#
+# It is also a constraint the data has to reach, and that turns out to be the
+# operationally interesting part. Pin the anchor at n = 0 but give the network
+# no samples near n = 0 -- `generate_dataset_combined(n_floor_range=(0.35,
+# 0.50))`, a fleet that only ever brakes mid-corner -- and mean |d_mu| goes
+# from 0.007 to 0.208 with the peak back at the grid edge, while the pin sits
+# in the loss the whole time doing nothing. The practical reading: you cannot
+# calibrate combined-slip tire capacity from cornering data alone. The
+# straight-line braking events are what fix the scale, and a dataset without
+# them fits its own residual just as well while recovering the wrong curve.
+
+
+@dataclass
+class CombinedDataset:
+    v: np.ndarray
+    s: np.ndarray
+    n: np.ndarray            # normalised lateral utilisation in [0, 1)
+    dv_dt: np.ndarray
+    run_id: np.ndarray
+
+
+class MuNetCombined(nn.Module):
+    """mu_x(s, n) = mu(s) * ellipse(n). Two heads, each a small MLP."""
+
+    def __init__(self, hidden: int = 32):
+        super().__init__()
+        self.mu_head = nn.Sequential(
+            nn.Linear(1, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh(),
+            nn.Linear(hidden, 1),
+        )
+        self.ellipse_head = nn.Sequential(
+            nn.Linear(1, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh(),
+            nn.Linear(hidden, 1),
+        )
+
+    def mu(self, s: torch.Tensor) -> torch.Tensor:
+        return 1.1 * torch.sigmoid(self.mu_head(s.view(-1, 1))).squeeze(-1)
+
+    def ellipse(self, n: torch.Tensor) -> torch.Tensor:
+        # 1.05 rather than 1.0 for the same reason MuNet uses 1.1: the
+        # ellipse(0) = 1 pin sits at the top of the range, and a clean sigmoid
+        # reaches 1.0 only asymptotically, so the pin would have to saturate
+        # the unit to be satisfied. The headroom keeps that gradient alive.
+        return 1.05 * torch.sigmoid(self.ellipse_head(n.view(-1, 1))).squeeze(-1)
+
+    def forward(self, s: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
+        return self.mu(s) * self.ellipse(n)
+
+
+def generate_dataset_combined(
+    n_runs: int = 16,
+    t_final: float = 4.0,
+    dt: float = 0.01,
+    noise_v: float = 0.15,
+    seed: int = 0,
+    pacejka: dict | None = None,
+    n_peak_range: tuple[float, float] = (0.15, 0.80),
+    n_floor_range: tuple[float, float] = (0.0, 0.05),
+    ramp_down_frac: float = 0.5,
+) -> tuple[CombinedDataset, dict]:
+    """Braking runs that are simultaneously cornering, at varying intensity.
+
+    Each run ramps lateral utilisation from a floor to a peak on its own
+    schedule, out of phase with the slip sweep. The phase offset is what keeps
+    the two inputs from being an exact function of one another, which is the
+    one condition under which mu(s) * ellipse(n) genuinely stops being
+    separable -- see the note on `ramp_down_frac` below for the measured
+    boundary between "correlated" (fine) and "collinear" (not).
+
+    `n_floor_range` is the ablation knob for the identifiability experiment.
+    Its default starts runs essentially straight, so the data reaches the
+    ellipse(0) = 1 anchor. Raising it to (0.35, 0.50) models a fleet that only
+    ever brakes mid-corner: the anchor stays in the loss but leaves the data,
+    and mean |d_mu| degrades from 0.007 to 0.208 over three seeds.
+    """
+    rng = np.random.default_rng(seed)
+    t = np.arange(0.0, t_final, dt)
+    pj = pacejka or PACEJKA_DRY
+    g = DEFAULTS["g"]
+    k_over_m = DEFAULTS["k"] / DEFAULTS["m"]
+
+    vs, ss, ns, dvs, rids = [], [], [], [], []
+    for run in range(n_runs):
+        v0 = float(rng.uniform(22.0, 32.0))
+        s_max = float(rng.uniform(0.20, 0.35))
+        hold_start = float(rng.uniform(0.0, 0.3))
+
+        n_floor = float(rng.uniform(*n_floor_range))
+        n_peak = float(rng.uniform(*n_peak_range))
+        n_peak = max(n_peak, n_floor)
+        # Lateral ramp gets its own start and duration so it is not collinear
+        # with the slip sweep.
+        n_start = float(rng.uniform(0.1, 1.2))
+        n_ramp = float(rng.uniform(0.6, 2.0))
+        # Half the runs release lateral demand as they brake (trail-braking
+        # out of a corner) instead of building it, which decorrelates n from
+        # the upward slip sweep: corr(s, n) falls from 0.70 to 0.12.
+        #
+        # Worth being exact about what that buys, because it is less than it
+        # looks. Ramp-up-only data (corr 0.70) recovers the split perfectly
+        # well -- mean |d_mu| = 0.004 against 0.007 for the mixed set. What
+        # breaks identifiability is not partial correlation but *exact*
+        # collinearity: tie n rigidly to s (corr = 1.00) and mean |d_mu| goes
+        # to 0.124 with the peak pinned at the grid edge, because then no
+        # (shape, scale) split is distinguishable from any other. Mixed
+        # directions are here for physical variety and margin against that
+        # degenerate case, not because the diagonal set fails.
+        ramp_down = bool(rng.random() < ramp_down_frac)
+
+        sched = sweep_slip(s_max=s_max, t_total=t_final, hold_start=hold_start)
+        s_t = np.array([sched(ti) for ti in t])
+        u = np.clip((t - n_start) / max(n_ramp, 1e-9), 0.0, 1.0)
+        n_t = (n_peak - (n_peak - n_floor) * u if ramp_down
+               else n_floor + (n_peak - n_floor) * u)
+
+        mu_eff = mu_pacejka(s_t, **pj) * np.sqrt(np.clip(1.0 - n_t ** 2, 0.0, None))
+
+        v = np.zeros_like(t)
+        v[0] = v0
+        for i in range(1, len(t)):
+            def rhs(vi, idx):
+                return -mu_eff[idx] * g - k_over_m * vi ** 2
+            k1 = rhs(v[i - 1], i - 1)
+            k2 = rhs(v[i - 1] + 0.5 * dt * k1, i - 1)
+            k3 = rhs(v[i - 1] + 0.5 * dt * k2, i - 1)
+            k4 = rhs(v[i - 1] + dt * k3, i)
+            v[i] = max(v[i - 1] + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4), 0.0)
+
+        v_noisy = v + rng.normal(0.0, noise_v, size=len(t))
+        v_s = _smooth(v_noisy, w=9)
+        dv_dt = np.gradient(v_s, dt)
+
+        mask = (v_s > 8.0) & (np.abs(dv_dt) < 12.0)
+        vs.append(v_s[mask])
+        ss.append(s_t[mask])
+        ns.append(n_t[mask])
+        dvs.append(dv_dt[mask])
+        rids.append(np.full(int(mask.sum()), run, dtype=int))
+
+    ds = CombinedDataset(
+        v=np.concatenate(vs),
+        s=np.concatenate(ss),
+        n=np.concatenate(ns),
+        dv_dt=np.concatenate(dvs),
+        run_id=np.concatenate(rids),
+    )
+    meta = {
+        "model": "pacejka+friction_ellipse",
+        "params": pj,
+        "n_samples": int(len(ds.v)),
+        "s_range": (float(ds.s.min()), float(ds.s.max())),
+        "n_range": (float(ds.n.min()), float(ds.n.max())),
+        "n_floor_range": n_floor_range,
+        "ramp_down_frac": ramp_down_frac,
+    }
+    return ds, meta
+
+
+def pinn_loss_combined(net: MuNetCombined, ds: CombinedDataset,
+                       lam_concave: float = 0.0, lam_mono_n: float = 0.5,
+                       lam_zero: float = 2.0, lam_anchor: float = 50.0
+                       ) -> tuple[torch.Tensor, dict]:
+    """Loss for the factorised mu(s) * ellipse(n) net.
+
+    `lam_concave` defaults to 0, matching `pinn_loss` and against
+    `pinn_loss_2d`. The brake-ramp net needs a shape prior because its scale
+    convention (ramp(1) ~ 1) does not pin the split; here ellipse(0) = 1 is
+    physics and does, so the prior is not needed and -- per the C3 story in
+    this module's docstring -- a prior that is not needed is a prior that can
+    only inject bias. Measured both ways in `reproduce.py::run_pinn_combined`.
+
+    The two physical constraints:
+      * mu(0) = 0        -- no slip, no longitudinal force.
+      * ellipse(0) = 1   -- no lateral demand, full budget available.
+    Plus one structural one, that spending more of the budget laterally cannot
+    increase longitudinal grip: d(ellipse)/dn <= 0.
+
+    `lam_anchor` is 50 and that weight is load-bearing, not a hyperparameter
+    that happened to work. ellipse(0) = 1 is an exact identity, not a soft
+    preference, and it is the only thing pinning the (shape, scale) split. At
+    lam_anchor = 2 the optimiser cheaply pays the penalty instead of obeying
+    it: measured over three seeds it settles at ellipse(0) ~ 0.83, mu(s)
+    saturates against its 1.1 cap with no interior peak, and mean |d_mu|
+    degrades from 0.007 to 0.194 -- while the *product* mu * ellipse still
+    fits the data to 0.011. The residual cannot see the difference; only the
+    anchor can. Training longer does not rescue it (8,000 epochs reaches
+    ellipse(0) ~ 0.98 and mean |d_mu| = 0.198): the split is decided early,
+    so the anchor has to bind from the start.
+    """
+    p_def = DEFAULTS
+    s = torch.tensor(ds.s, dtype=torch.float32)
+    n = torch.tensor(ds.n, dtype=torch.float32)
+    v = torch.tensor(ds.v, dtype=torch.float32)
+    dv = torch.tensor(ds.dv_dt, dtype=torch.float32)
+
+    mu_eff = net(s, n)
+    dv_pred = -mu_eff * p_def["g"] - (p_def["k"] / p_def["m"]) * v * v
+    loss_data = torch.mean((dv - dv_pred) ** 2)
+
+    # Physics: no slip, no force.
+    loss_zero = net.mu(torch.tensor([0.0])).pow(2).mean()
+
+    # Physics: no lateral demand, full longitudinal budget. This is the anchor
+    # that makes the factorisation identifiable -- see the module note.
+    loss_anchor = (net.ellipse(torch.tensor([0.0])) - 1.0).pow(2).mean()
+
+    # Structural: more lateral use cannot mean more longitudinal grip.
+    n_grid = torch.linspace(0.0, 1.0, 60, requires_grad=True)
+    e_grid = net.ellipse(n_grid)
+    de_dn = torch.autograd.grad(e_grid.sum(), n_grid, create_graph=True)[0]
+    loss_mono = torch.mean(torch.relu(de_dn) ** 2)
+
+    loss_concave = torch.zeros(())
+    if lam_concave > 0.0:
+        s_grid = torch.linspace(0.0, 0.3, 80, requires_grad=True)
+        mu_grid = net.mu(s_grid)
+        dmu = torch.autograd.grad(mu_grid.sum(), s_grid, create_graph=True)[0]
+        d2mu = torch.autograd.grad(dmu.sum(), s_grid, create_graph=True)[0]
+        loss_concave = torch.mean(torch.relu(d2mu) ** 2)
+
+    total = (loss_data + lam_zero * loss_zero + lam_anchor * loss_anchor
+             + lam_mono_n * loss_mono + lam_concave * loss_concave)
+    return total, {
+        "data":    float(loss_data.item()),
+        "zero":    float(loss_zero.item()),
+        "anchor":  float(loss_anchor.item()),
+        "mono":    float(loss_mono.item()),
+        "concave": float(loss_concave.item()),
+    }
+
+
+def train_pinn_combined(ds: CombinedDataset, *, epochs: int = 5000,
+                        lr: float = 5e-3, seed: int = 0,
+                        lam_concave: float = 0.0, verbose: bool = False
+                        ) -> tuple[MuNetCombined, list[float]]:
+    torch.manual_seed(seed)
+    net = MuNetCombined()
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    history: list[float] = []
+    for epoch in range(epochs):
+        opt.zero_grad()
+        loss, parts = pinn_loss_combined(net, ds, lam_concave=lam_concave)
+        loss.backward()
+        opt.step()
+        if epoch % 200 == 0 or epoch == epochs - 1:
+            history.append(float(loss.item()))
+            if verbose:
+                print(f"  epoch {epoch:4d}  total={loss.item():.4f}  "
+                      f"data={parts['data']:.4f}  anchor={parts['anchor']:.4f}  "
+                      f"mono={parts['mono']:.4f}")
+    return net, history
+
+
+def evaluate_curve_combined(net: MuNetCombined, n: int = 200,
+                            s_max: float = 0.3
+                            ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Returns `(s, mu_s, n_grid, ellipse_n)` -- the two factorised heads."""
+    s = np.linspace(0.0, s_max, n)
+    n_grid = np.linspace(0.0, 1.0, n)
+    with torch.no_grad():
+        mu_s = net.mu(torch.tensor(s, dtype=torch.float32)).numpy()
+        e_n = net.ellipse(torch.tensor(n_grid, dtype=torch.float32)).numpy()
+    return s, mu_s, n_grid, e_n

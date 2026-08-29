@@ -148,3 +148,79 @@ def sweep_slip(s_max: float = 0.35, t_total: float = 4.0, hold_start: float = 0.
         u = (ti - hold_start) / max(t_total - hold_start, 1e-9)
         return s_max * min(max(u, 0.0), 1.0)
     return schedule
+
+
+# ---------------------------------------------------------------------------
+# Combined slip: the friction ellipse
+# ---------------------------------------------------------------------------
+#
+# Everything above treats the tire as though its entire friction budget were
+# available longitudinally. It is not. A tire has one contact patch and one
+# limit; force spent turning is not available for stopping. The standard
+# lumped model is the friction ellipse,
+#
+#     (F_x / (mu_x N))^2 + (F_y / (mu_y N))^2 <= 1,
+#
+# which with mu_x = mu_y is a circle. Writing n for the fraction of the budget
+# already spent laterally, n = a_y / (g * D), the longitudinal coefficient
+# that remains is mu(s) * sqrt(1 - n^2).
+#
+# This is a lumped single-track approximation, not a combined-slip Pacejka
+# model: it derates the whole mu(s) curve by one scalar rather than solving
+# for the (kappa, alpha) force surface with the G_x-alpha / G_y-kappa
+# weighting functions of Pacejka (2002) sec. 4.3.2. It also assumes lateral
+# demand is an exogenous input rather than a state, which is what keeps the
+# model 1-DOF -- see the Roadmap in the README for what dropping each of those
+# assumptions costs.
+
+
+def lateral_utilisation(a_y, D: float = 0.9, g: float = None):
+    """Fraction of the friction budget spent laterally, n = a_y / (g * D).
+
+    `a_y` is lateral acceleration in m/s^2, `D` the tire's peak friction
+    coefficient. n = 1 means the tire is at its limit in pure cornering and
+    has no longitudinal capacity left.
+    """
+    g = DEFAULTS["g"] if g is None else g
+    return np.abs(np.asarray(a_y, dtype=float)) / max(g * D, 1e-9)
+
+
+def friction_ellipse(n_lat):
+    """Longitudinal derating factor sqrt(1 - n^2) from the friction ellipse.
+
+    Exactly 1.0 at n = 0 (straight-line braking, full budget available) and
+    0.0 at n = 1 (tire saturated laterally). Clipped outside [0, 1] so an
+    over-demanded corner returns zero longitudinal capacity rather than a NaN.
+    """
+    n = np.clip(np.asarray(n_lat, dtype=float), 0.0, 1.0)
+    return np.sqrt(np.clip(1.0 - n * n, 0.0, None))
+
+
+def mu_combined(s, n_lat, B: float = 10.0, C: float = 1.9, D: float = 0.9,
+                E: float = 0.97):
+    """Longitudinal friction under combined slip: mu(s) * sqrt(1 - n^2).
+
+    The factorisation is the whole point for the 2D PINN in `src/ml/pinn.py`:
+    the network is given (s, n) and has to split the product back into a slip
+    curve and a derating factor without being told which is which.
+    """
+    return mu_pacejka(s, B, C, D, E) * friction_ellipse(n_lat)
+
+
+def corner_demand(n_max: float = 0.6, ramp: float = 1.2, hold_start: float = 0.4):
+    """Lateral-demand schedule: hold straight, ramp into a corner, then hold.
+
+    Given its own `hold_start` and `ramp` rather than reusing the slip
+    schedule's, so that lateral demand is not an exact function of slip. That
+    exact case is the one that defeats the factorisation in `mu_combined`:
+    with n rigidly tied to s the network can trade any amount of one factor
+    against the other and still fit the data. Merely *correlated* inputs are
+    fine -- see `src/ml/pinn.py::generate_dataset_combined` for the measured
+    difference between the two.
+    """
+    def schedule(ti: float) -> float:
+        if ti < hold_start:
+            return 0.0
+        u = (ti - hold_start) / max(ramp, 1e-9)
+        return n_max * min(max(u, 0.0), 1.0)
+    return schedule
