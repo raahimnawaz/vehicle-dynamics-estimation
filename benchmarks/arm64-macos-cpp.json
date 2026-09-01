@@ -1,0 +1,28 @@
+{
+  "host": {
+    "os": "Darwin",
+    "machine": "arm64"
+  },
+  "compiler": "clang 21.0.0 (clang-2100.1.1.101)",
+  "flags": "-std=c++17 -O3 -ffast-math -funroll-loops -DNDEBUG -Wall -Wextra -Wpedantic",
+  "iterations": 100000,
+  "batch": 200,
+  "results": {
+    "ekf_step_ns": {
+      "median": 7,
+      "p99": 9,
+      "min": 6,
+      "max": 77,
+      "throughput_mops": 142.857143
+    },
+    "pinn_forward_ns": {
+      "median": 262,
+      "p99": 306,
+      "min": 244,
+      "max": 404,
+      "throughput_mops": 3.816794
+    }
+  },
+  "date": "2026-09-01",
+  "notes": "Per-op timings; batch amortises steady_clock resolution, which is coarser than one EKF step -- at batch=1 the timer dominates and the median inflates several-fold. Absolute figures are host- and thermal-state-dependent; the speedup ratios against the matching *-python.json on the same host are the portable quantity."
+}

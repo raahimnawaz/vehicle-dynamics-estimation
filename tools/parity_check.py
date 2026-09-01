@@ -4,6 +4,12 @@ and report max-abs-error on EKF state and PINN output.
 This is the regression that catches drift between the two ports. Numbers should
 agree to ~1e-9 in double precision (no algorithmic difference, only the order
 of FP ops which the optimiser may reorder under -ffast-math).
+
+Exceeding a tolerance is a FAILURE, not a warning: this script exits non-zero
+so CI stops on it. It previously printed "WARNING: ..." and exited 0, which is
+how the C2 activation-scale bug survived in the open -- the harness reported a
+five-order-of-magnitude parity error on every run and nothing was listening.
+A check nobody can fail is not a check.
 """
 
 from __future__ import annotations
@@ -22,6 +28,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from src.estimation.kalman import VehicleEKF  # noqa: E402
 from src.ml.pinn import MuNet  # noqa: E402
 from src.physics.wheel import K_DRAG  # noqa: E402
+
+
+# Tolerances. The EKF pair is pure double-precision arithmetic differing only
+# in FP op order under -ffast-math, so 1e-6 is many orders above the observed
+# 7e-9 and still catches any algorithmic divergence. The PINN pair is limited
+# by float32 quantisation of the exported weights against the float64 C++ path,
+# which lands at ~2e-7; 1e-5 leaves headroom for that without admitting the
+# 2.3e-1 that the wrong activation scale produced.
+EKF_MU_TOL = 1e-6
+EKF_V_TOL = 1e-6
+PINN_TOL = 1e-5
 
 
 def assert_drag_constant_in_lockstep() -> None:
@@ -54,7 +71,7 @@ def _run_cpp(binary: str, subcmd: str, input_csv: str, out_csv: str) -> None:
         sys.exit(res.returncode)
 
 
-def parity_ekf(binary: str, n_steps: int = 2000, dt: float = 0.01) -> None:
+def parity_ekf(binary: str, n_steps: int = 2000, dt: float = 0.01) -> list[str]:
     rng = np.random.default_rng(0)
     true_mu, true_k = 0.7, K_DRAG
     v = 30.0
@@ -106,12 +123,17 @@ def parity_ekf(binary: str, n_steps: int = 2000, dt: float = 0.01) -> None:
     print(f"  mu    max|diff| = {np.max(np.abs(py_mu - cpp_mu)):.3e}")
     print(f"  sig_v max|diff| = {np.max(np.abs(py_sv - cpp_sv)):.3e}")
     print(f"  sig_m max|diff| = {np.max(np.abs(py_sm - cpp_sm)):.3e}")
+    failures = []
     err_mu = float(np.max(np.abs(py_mu - cpp_mu)))
-    if err_mu > 1e-6:
-        print(f"  WARNING: mu parity error {err_mu:.3e} exceeds 1e-6")
+    if err_mu > EKF_MU_TOL:
+        failures.append(f"EKF mu parity {err_mu:.3e} exceeds {EKF_MU_TOL:.0e}")
+    err_v = float(np.max(np.abs(py_v - cpp_v)))
+    if err_v > EKF_V_TOL:
+        failures.append(f"EKF v parity {err_v:.3e} exceeds {EKF_V_TOL:.0e}")
+    return failures
 
 
-def parity_pinn(binary: str, weights: str, n: int = 500) -> None:
+def parity_pinn(binary: str, weights: str, n: int = 500) -> list[str]:
     s = np.linspace(0.0, 0.3, n)
     tmp = tempfile.mkdtemp(prefix="parity_pinn_")
     in_csv  = os.path.join(tmp, "in.csv")
@@ -134,8 +156,11 @@ def parity_pinn(binary: str, weights: str, n: int = 500) -> None:
     diff = np.abs(py_mu - cpp_mu)
     print("PINN parity:")
     print(f"  mu max|diff| = {np.max(diff):.3e}    mean|diff| = {np.mean(diff):.3e}")
-    if np.max(diff) > 1e-5:
-        print(f"  WARNING: PINN parity max-diff {np.max(diff):.3e} exceeds 1e-5")
+    if float(np.max(diff)) > PINN_TOL:
+        return [f"PINN parity {float(np.max(diff)):.3e} exceeds {PINN_TOL:.0e} -- "
+                f"the usual cause is cpp/include/vd/pinn_weights.h being stale "
+                f"against models/pinn_mu.pth; re-run tools/export_weights.py"]
+    return []
 
 
 def main() -> None:
@@ -152,8 +177,15 @@ def main() -> None:
             print(f"parity binary not found at {args.binary}; build with `make -C cpp parity`")
             sys.exit(2)
     assert_drag_constant_in_lockstep()
-    parity_ekf(args.binary)
-    parity_pinn(args.binary, args.weights)
+    failures = parity_ekf(args.binary)
+    failures += parity_pinn(args.binary, args.weights)
+
+    if failures:
+        print("\nPARITY FAILED:")
+        for f in failures:
+            print(f"  - {f}")
+        sys.exit(1)
+    print("\nparity OK: Python and C++ agree within tolerance")
 
 
 if __name__ == "__main__":

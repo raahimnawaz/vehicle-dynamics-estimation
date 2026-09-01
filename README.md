@@ -34,7 +34,7 @@ pytest                                               # 22 fast tests; add -m slo
 | Combined-slip PINN, mean \|Δμ\| / \|Δellipse\| | **0.005** / **0.004** | [Combined slip](#3c-combined-slip-the-friction-ellipse-munetcombined) |
 | Combined-slip PINN-C, worst-case cornering RMSE | **2.0 %** of $v_0$ (vs 19.9 % PINN, 19.4 % PINN-B) | [Mismatch](#4-model-mismatch-which-method-when) |
 | Brake-aware PINN-B, worst-case brake-ramp RMSE | **4.4 %** of $v_0$ (vs 16.9 % EKF, 17.8 % PINN, 21.3 % MLP) | [Mismatch](#4-model-mismatch-which-method-when) |
-| C++ EKF latency | **15 ns** median, 37 ns p99 (Apple M-series) | [C++ port](#6-c-edge-port) |
+| C++ EKF latency | **7 ns** median, 9 ns p99 (Apple M-series) | [C++ port](#6-c-edge-port) |
 | C++ binary, deps, allocations | 35 KB, **0** external deps, **0** runtime allocations | [C++ port](#6-c-edge-port) |
 | Numerical parity (Py ↔ C++) | $7.4 \times 10^{-9}$ EKF, $1.9 \times 10^{-7}$ PINN | [C++ port](#6-c-edge-port) |
 
@@ -50,8 +50,8 @@ Constant-μ forward model, ground-truth μ = 0.7, sensor noise applied, three es
 |---|---:|---:|---|---|
 | Ground truth | 0.7000 | — | — | — |
 | SciPy batch (Nelder-Mead) | 0.7021 | 0.3 % | offline | offline-optimal |
-| Extended Kalman Filter | 0.6869 | 1.9 % | 15 ns / step (C++) | online |
-| FrictionNet (MLP, 50-sample window) | 0.7400 | 5.7 % | 261 ns (C++ PINN path) | one-shot inference |
+| Extended Kalman Filter | 0.6869 | 1.9 % | 7 ns / step (C++) | online |
+| FrictionNet (MLP, 50-sample window) | 0.7400 | 5.7 % | 262 ns (C++ PINN path) | one-shot inference |
 
 The MLP is the weakest of the three here, and that is expected rather than disappointing — it has no physics and must infer a slope from 50 raw velocity samples. With the corrected (physical) drag coefficient, velocity falls only 3.5 m/s across its window against 0.5 m/s of sensor noise. Under the old, unphysically large drag the same window spanned 9.5 m/s, so the network had a 2.7× stronger signal and looked correspondingly more accurate.
 
@@ -224,6 +224,25 @@ Every online method degrades sharply as the ramp lengthens except **PINN-B**, wh
 
 ![Brake-aware PINN recovery](results/pinn_brake_recovery.png)
 
+**What it costs to get that, in the currency of §3.** The robustness number above is a trajectory
+score. The recovery quality underneath it is worse than every other net in this repo:
+
+| net | what it factorises | mean $\lvert\Delta\mu(s)\rvert$ | second factor |
+|---|---|---:|---:|
+| `MuNet` (§3a) | nothing — $\mu(s)$ alone | **0.013** | — |
+| `MuNetCombined` (§3c) | $\mu(s)\cdot\mathrm{ellipse}(n)$ | **0.005** | 0.004 |
+| **`MuNet2D`** (PINN-B, here) | $\mu(s)\cdot\mathrm{ramp}(p)$ | **0.045** | 0.136 |
+
+Both 2D nets solve a factorisation, and only one of them recovers its factors. The difference is
+the one §3c identifies: `MuNetCombined` has $\mathrm{ellipse}(0) = 1$, an *exact* identity that
+pins the split, whereas `ramp(p)`'s scale convention is a choice rather than a physical fact —
+which is why `MuNet2D` is the one net here that still needs a concavity prior, and why dropping
+that prior costs it 0.055 → 0.309 (§3a). PINN-B predicts the trajectory well while recovering
+the tire curve 3.5× worse than the 1D net it is built on. **Trajectory accuracy and parameter
+identifiability are different properties, and this is the cell in the repo where they come
+apart most clearly** — the same distinction the augmented-EKF negative result turns on
+(see Roadmap): fitting better is not identifying better.
+
 **Caveat, stated plainly:** PINN-B receives the brake-pressure trajectory as an input, and in this harness that trajectory is constructed from the ground-truth τ. The 1D PINN likewise receives the exact, noiseless slip trajectory, while Batch, EKF and the MLP see only noisy velocity. So this comparison is partly *more information* against *a different algorithm*. The defensible claim is narrower than the table suggests and still worth making: **adding the brake-pressure channel fixes brake-lag mismatch, and brake pressure is a real signal already on the CAN bus.** The 4.4 % figure is a best case with a noiseless, perfectly time-aligned pressure trace; degrading that signal until the advantage disappears is the obvious next experiment.
 
 ### 4c. Cornering degradation — and why an extra channel is not general robustness
@@ -285,15 +304,17 @@ Tuning knob: `q_mu` in [`src/scenarios/runner.py`](src/scenarios/runner.py). The
 
 Same algorithm, same inputs, same host. Both runs report median + p99 across batched samples; per-op times divide a 200-op inner loop by 200 to amortise timer resolution.
 
-**Apple M-series, arm64** ([`benchmarks/arm64-macos-python.json`](benchmarks/) + `make -C cpp run-bench`):
+**Apple M-series, arm64.** Both columns are archived and regenerable: [`benchmarks/arm64-macos-python.json`](benchmarks/) (`python tools/bench_python.py`) and [`benchmarks/arm64-macos-cpp.json`](benchmarks/) (`make -C cpp bench-json`).
 
 | Op | Python | C++ | Speedup |
 |---|---:|---:|---:|
-| EKF step — vs NumPy `VehicleEKF` | 2,520 ns | **15 ns** | 168× |
-| EKF step — vs scalar Python, same math | 289 ns | **15 ns** | **19×** |
-| PINN forward (1→32→32→1) | 10,580 ns | **261 ns** | 41× |
+| EKF step — vs NumPy `VehicleEKF` | 2,520 ns | **7 ns** | 360× |
+| EKF step — vs scalar Python, same math | 289 ns | **7 ns** | **41×** |
+| PINN forward (1→32→32→1) | 10,580 ns | **262 ns** | 40× |
 
-**On the speedup number.** An earlier version of this README headlined a 3,414× EKF speedup, measured on an older Windows/Zen host ([`benchmarks/x86_64-msys2-ucrt64.json`](benchmarks/)). That measurement is real, but the denominator is misleading: `VehicleEKF` calls into NumPy on 2×2 arrays, where per-call dispatch costs far more than the ~30 floating-point operations the filter performs. `tools/bench_python.py` now also benchmarks `ScalarEkf` — identical math, plain Python, no NumPy — which runs 8.7× faster than the NumPy version. **That is the fair baseline, and against it the C++ port is ~19×, not thousands.** The rest was a library-choice artifact.
+**On the speedup number.** An earlier version of this README headlined a 3,414× EKF speedup, measured on an older Windows/Zen host ([`benchmarks/x86_64-msys2-ucrt64.json`](benchmarks/)). That measurement is real, but the denominator is misleading: `VehicleEKF` calls into NumPy on 2×2 arrays, where per-call dispatch costs far more than the ~30 floating-point operations the filter performs. `tools/bench_python.py` now also benchmarks `ScalarEkf` — identical math, plain Python, no NumPy — which runs 8.7× faster than the NumPy version. **That is the fair baseline, and against it the C++ port is ~41×, not thousands.** The rest was a library-choice artifact.
+
+**On the provenance of the C++ column.** Until this table was rebuilt, the Python side was archived as JSON and the C++ side was typed in by hand from a run that was never recorded — so the one column nobody could re-derive was the one carrying the claim. Two things came out of fixing that. The benchmark now writes the same JSON schema as its Python counterpart (`make -C cpp bench-json`), and `run-bench` no longer defaults to `batch=1`: a single EKF step is shorter than `steady_clock`'s tick, so an unbatched run times the *clock* and reports ~42 ns instead of 7 ns. The stale 15 ns figure sat between the two. The binary now warns when it is given a batch too small to measure itself.
 
 Which matters less than it sounds, because **latency was never the constraint here.** Even 34 µs — the slowest Python EKF step measured anywhere here, on the x86_64 host ([`benchmarks/x86_64-python.json`](benchmarks/)) — fits a 100 Hz control budget nearly 300 times over. What actually gates deployment is the footprint below.
 
@@ -420,22 +441,23 @@ For the EKF the state is $x = [v, \mu]^T$ with μ modelled as a random walk. Sin
 ## Project structure
 
 ```text
+reproduce.py         # the entry point: regenerates every figure and number below
 src/
 ├── physics/        # governing equations, K_DRAG, Pacejka + exponential μ
-├── solvers/        # Euler, RK4, SciPy wrappers
+├── solvers/        # generic RK4 (autonomous problems only — see the docstring)
 ├── simulation/     # forward vehicle model + sensor model
 ├── data/           # real-telemetry CSV loader
 ├── estimation/     # batch optimiser + EKF
-├── ml/             # FrictionNet + MuNet/MuNet2D/PacejkaNet
+├── ml/             # FrictionNet + MuNet/MuNet2D/PacejkaNet/MuNetCombined
 ├── scenarios/      # adversarial + mismatch sweep
 └── visualization/  # plotting
 cpp/                # header-only allocation-free C++17 port
 tools/              # benchmark + parity + weight-export scripts
-tests/              # pytest suite (22 fast, 4 slow)
+tests/              # pytest suite (22 fast, 4 slow — CI runs both)
 data/               # sample telemetry CSV
 results/            # generated figures (regenerated by reproduce.py)
 figures/            # duplicate of the synthetic-benchmark figure, kept for older links
-benchmarks/         # latency JSON dumps
+benchmarks/         # latency JSON dumps, Python and C++, one pair per host
 models/             # exported PyTorch weights
 ```
 
@@ -458,7 +480,7 @@ models/             # exported PyTorch weights
 - [ ] Re-run the mismatch study with every method on *equal information* — noisy derived slip, lagged noisy brake pressure, noisy lateral acceleration. Both PINN-B and PINN-C currently receive their second channel noiseless and perfectly time-aligned, built from the ground-truth intensity; degrading each until the advantage disappears is the experiment that would turn §4a into a fair comparison rather than an informative one
 - [x] ~~Augment the EKF state to $[v, \mu, k]$~~ — **tried, and it does not do what it looks like it should.** Prototyped as a 3-state filter: $k$ is effectively unobservable from this data. Starting from the true value it drifts to $1.06\times10^{-3}$ (4× high) with $\sigma_k = 8.1\times10^{-3}$ — the uncertainty is 8× the estimate. Starting from the old 75×-wrong prior it does **not** self-correct, ending at $1.4\times10^{-2}$ with 17.7 % replay RMSE. The reason is in the physics: at road speeds drag is ~2 % of the deceleration, so the velocity innovation carries almost no information about $k$. Mean error over the mismatch sweep moves 3.7 % → 3.6 %, i.e. nothing. Worst-case does improve (16.9 % → 12.7 %, concentrated in the brake-ramp column), but that is the extra parameter acting as a *slack variable* absorbing structural error — the same mechanism that flatters the batch fit — not drag being identified. Not worth shipping a filter that reports a drag coefficient nobody should trust.
 - [ ] Close the loop: wheel rotational dynamics + slip observer
-- [ ] **Lateral dynamics: bicycle model + $F_y(\alpha)$ identification.** ~3 weeks, and the C++ port is what pays for it. The physics is nearly free — `mu_pacejka` transfers to $F_y(\alpha)$ verbatim with $\alpha$ substituted for $s$, and `PacejkaNet` becomes $(B_y, C_y, D_y, E_y)$. The estimation is not. State goes from $[v, \mu]$ to $[v_x, v_y, r, \mu]$; measurements from velocity alone to IMU ($a_x$, $a_y$, yaw rate); and $S = P_{00} + R$ stops collapsing to a scalar, so the filter needs a real inverse and the hand-rolled 2×2 in [`cpp/include/vd/matrix.hpp`](cpp/include/vd/matrix.hpp), the zero-allocation claim and the 15 ns figure all have to be re-established. Needs a lateral excitation library too (step steer, slalom, skidpad ramp): straight-line braking excites longitudinal slip and nothing else. **Expect a negative result on peak lateral μ.** Cornering stiffness is observable in the linear region, but normal driving rarely exceeds ~0.3 g laterally, so $D_y$ is pure extrapolation — identifying it needs limit-handling data, which makes it a data-collection problem rather than an estimator one. Worth writing up as such either way, in the shape of the augmented-EKF entry above
+- [ ] **Lateral dynamics: bicycle model + $F_y(\alpha)$ identification.** ~3 weeks, and the C++ port is what pays for it. The physics is nearly free — `mu_pacejka` transfers to $F_y(\alpha)$ verbatim with $\alpha$ substituted for $s$, and `PacejkaNet` becomes $(B_y, C_y, D_y, E_y)$. The estimation is not. State goes from $[v, \mu]$ to $[v_x, v_y, r, \mu]$; measurements from velocity alone to IMU ($a_x$, $a_y$, yaw rate); and $S = P_{00} + R$ stops collapsing to a scalar, so the filter needs a real inverse and the hand-rolled 2×2 in [`cpp/include/vd/matrix.hpp`](cpp/include/vd/matrix.hpp), the zero-allocation claim and the 7 ns figure all have to be re-established. Needs a lateral excitation library too (step steer, slalom, skidpad ramp): straight-line braking excites longitudinal slip and nothing else. **Expect a negative result on peak lateral μ.** Cornering stiffness is observable in the linear region, but normal driving rarely exceeds ~0.3 g laterally, so $D_y$ is pure extrapolation — identifying it needs limit-handling data, which makes it a data-collection problem rather than an estimator one. Worth writing up as such either way, in the shape of the augmented-EKF entry above
 - [ ] **Full combined-slip Pacejka.** ~6–10 weeks. The $G_{x\alpha}$ / $G_{y\kappa}$ weighting functions of Pacejka (2002) §4.3.2 in place of §3c's lumped scalar derating, plus per-axle normal load transfer — which stops being ignorable the moment longitudinal and lateral demand are both live, since braking shifts load forward and changes each axle's capacity. Every estimator in §4 then needs a lateral-capable variant, so the mismatch grid multiplies rather than adds. This is the version that would let §3c drop its "one scalar derating" caveat, and it is a thesis chapter rather than a weekend
 - [ ] Jetson aarch64 benchmarks; NEON / SVE intrinsics; fp16/int8 quantisation
 - [ ] Joseph-form covariance update; drop `-ffast-math` for the shipping path
@@ -467,9 +489,18 @@ models/             # exported PyTorch weights
 
 ## Reproducibility
 
-Every figure in this README is regenerated by `python reproduce.py --all` from seeded inputs, which also re-bakes the C++ weights header so `tools/parity_check.py` stays valid. Numerical tables print to stdout from the same script; tests pin the qualitative behaviour ([`tests/test_mismatch.py`](tests/test_mismatch.py), [`tests/test_pinn.py`](tests/test_pinn.py)) so estimator regressions surface in CI.
+Every figure in this README is regenerated by `python reproduce.py --all` from seeded inputs, which also re-bakes the C++ weights header so `tools/parity_check.py` stays valid. Numerical tables print to stdout from the same script.
 
-Absolute latency and binary-size figures are host-dependent and are labelled with the machine that produced them.
+`reproduce.py` asserts nothing — it prints and plots — so the guarantees live in CI, which runs four jobs rather than one:
+
+| job | what it would catch |
+|---|---|
+| `test` | ordinary unit regressions, on 3.11 and 3.12 |
+| `regression-guards` | `pytest -m slow` — including `test_no_method_is_broken_at_nominal`, the invariant that makes [C1](#c1--a-75-drag-coefficient-inconsistency-between-the-two-forward-models) unrepeatable. `pytest.ini` sets `addopts = -m "not slow"`, so this needs its own job or it never runs |
+| `cpp-parity` | [C2](#c2--the-c-pinn-applied-the-wrong-activation-scale) in both its halves: a stale `pinn_weights.h` against the committed model, and any Python↔C++ numerical divergence. `tools/parity_check.py` exits non-zero on a tolerance breach — it used to print `WARNING` and exit 0, which is precisely how C2 stayed hidden while the harness reported it on every run |
+| `reproduce` | the end-to-end pipeline still runs |
+
+Absolute latency and binary-size figures are host-dependent and are labelled with the machine that produced them; both sides of every benchmark pair are archived under [`benchmarks/`](benchmarks/) so the speedup ratios can be re-derived rather than taken on trust.
 
 ## License
 

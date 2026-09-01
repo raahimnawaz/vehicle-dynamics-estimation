@@ -2,12 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [cpp-edge-port, main, master]
+    branches: [main, master]
   pull_request:
-    branches: [cpp-edge-port, main, master]
+  workflow_dispatch:
 
 jobs:
+  # Fast feedback: the 22 unit tests that run in ~2 s.
   test:
+    name: unit tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -28,8 +30,106 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Run fast tests
         run: pytest -q
 
-      - name: Smoke-test reproduce pipeline
+  # The tests that actually guard the corrections in the README.
+  #
+  # pytest.ini sets `addopts = -m "not slow"`, so a plain `pytest -q` deselects
+  # four tests -- including test_no_method_is_broken_at_nominal, which exists
+  # specifically so the C1 drag inconsistency cannot come back. For a while
+  # this workflow ran only the fast suite, which meant the guard written to
+  # make C1 unrepeatable was never executed by anything except a developer who
+  # remembered to type `-m slow`. The other CI step, `reproduce.py --all`,
+  # cannot catch it either: that script has no numerical assertions, so a
+  # regression prints wrong numbers and exits 0.
+  regression-guards:
+    name: regression guards (slow tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run slow tests
+        run: pytest -q -m slow
+
+  # Cross-language drift is what C2 was. The Python suite cannot see it, so it
+  # needs its own job: build the port, then assert the two implementations
+  # still agree. tools/parity_check.py exits non-zero on a tolerance breach
+  # and re-checks that the drag constant is in lockstep before reporting any
+  # parity figure at all.
+  cpp-parity:
+    name: C++ build + Python parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build the edge port
+        run: make -C cpp
+
+      # The second half of C2: `reproduce.py --all` used to retrain the PINN and
+      # overwrite models/pinn_mu.pth without re-exporting the header, so
+      # following the README silently invalidated the parity claim. Re-exporting
+      # from the *committed* model is deterministic (it is a tensor-to-text
+      # dump, no training), so a non-empty diff here means the two are out of
+      # sync in the repository as published.
+      - name: Weights header must match the committed model
+        run: |
+          python tools/export_weights.py
+          if ! git diff --quiet -- cpp/include/vd/pinn_weights.h; then
+            echo "::error::cpp/include/vd/pinn_weights.h is stale against models/pinn_mu.pth."
+            echo "Re-run tools/export_weights.py and commit the result."
+            git diff -- cpp/include/vd/pinn_weights.h
+            exit 1
+          fi
+          echo "weights header is in sync with the committed model"
+
+      - name: Numerical parity, Python vs C++
+        run: python tools/parity_check.py
+
+      - name: Benchmark smoke test
+        run: make -C cpp run-bench
+
+  # End-to-end: every figure and number in the README regenerates from seeded
+  # inputs. This is a smoke test, not an assertion -- reproduce.py prints and
+  # plots but does not check anything, which is why `regression-guards` above
+  # exists. Bit-identical output is only expected on a fixed host; PyTorch does
+  # not promise cross-platform reproducibility, so this job checks that the
+  # pipeline runs end to end, not that it lands on the same weights.
+  reproduce:
+    name: reproduce pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Regenerate every figure and number
         run: python reproduce.py --all
