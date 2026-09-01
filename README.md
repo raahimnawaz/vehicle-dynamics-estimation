@@ -6,7 +6,7 @@
 
 A reproducible benchmark for vehicle-dynamics system identification: first-principles longitudinal braking dynamics, explicit ODE solvers, five estimators on the same data (batch optimiser, EKF, MLP, two physics-informed networks), an honest model-mismatch study, and an allocation-free C++ edge port that matches the Python reference to $10^{-9}$.
 
-The repo is structured to make every claim verifiable — `python reproduce.py --all` regenerates every figure and number in this README from seeded inputs.
+The repo is structured to make every claim verifiable — `python reproduce.py --all` regenerates every figure and number in this README from seeded inputs. [Corrections](#corrections) documents an August 2026 audit that moved several of them.
 
 ---
 
@@ -203,8 +203,6 @@ This is not a leaderboard — it is the operating envelope of each method.
 | PINN (1D, function-free) | 6.5 % | 1.9 % | 17.8 % | 19.9 % | 4.8 % |
 | **PINN-B (brake-aware, 2D)** | 7.0 % | 2.3 % | **4.4 %** | 19.4 % | 4.0 % |
 | **PINN-C (cornering-aware, 2D)** | 6.2 % | 1.5 % | 18.1 % | **2.0 %** | 3.1 % |
-
-The means moved against earlier versions of this table because cornering is a fourth column, not because any method changed.
 
 ![Per-method degradation curves](results/mismatch_per_method.png)
 
