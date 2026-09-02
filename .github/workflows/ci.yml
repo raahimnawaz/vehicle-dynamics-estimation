@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Fast feedback: the 22 unit tests that run in ~2 s.
+  # Fast feedback: the 25 unit tests that run in ~2 s.
   test:
     name: unit tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
