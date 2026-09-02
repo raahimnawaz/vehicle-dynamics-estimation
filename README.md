@@ -10,7 +10,7 @@ The repo is structured to make every claim verifiable — `python reproduce.py -
 
 ![Recovering the tire curve from noisy braking data](results/pinn_recovery.png)
 
-*The headline result: a network with no assumed functional form recovers the Pacejka friction curve — rise, peak and post-peak fall — from the scattered red cloud of noisy trajectory data behind it, locating the peak at (0.124, 0.890) against a true (0.127, 0.900).*
+*The headline result: a network with no assumed functional form recovers the Pacejka friction curve - rise, peak and post-peak fall — from the scattered red cloud of noisy trajectory data behind it, locating the peak at (0.124, 0.890) against a true (0.127, 0.900).*
 
 <details>
 <summary><b>Contents</b></summary>
@@ -181,7 +181,7 @@ $$\mu_x(s, n) \;=\; \mu(s)\,\sqrt{1 - n^2}.$$
 | mean $\lvert\Delta\,\mathrm{ellipse}(n)\rvert$ | **0.004** |
 | Recovered peak | $(0.128,\ 0.891)$ — true $(0.127,\ 0.900)$ |
 
-At 0.005 that is below both the function-free 1D net's 0.013 and the grey-box `PacejkaNet`'s 0.007, without being told the curve family — but it is not a like-for-like win, because this net sees strictly more. The second input is information, not just capacity: the same curve observed at several derating levels is better determined than one observed at a single level. The fair reading is that the lateral channel pays for itself, not that free-form beats grey-box.
+At 0.005 that is below both the function-free 1D net's 0.013 and the grey-box `PacejkaNet`'s 0.007, without being told the curve family but it is not a like-for-like win, because this net sees strictly more. The second input is information, not just capacity: the same curve observed at several derating levels is better determined than one observed at a single level. The fair reading is that the lateral channel pays for itself, not that free-form beats grey-box.
 
 #### What actually makes it identifiable
 
