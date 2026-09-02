@@ -351,22 +351,46 @@ def pinn_loss(net: MuNet, ds: Dataset, lam_concave: float = 0.0,
     }
 
 
-def pinn_loss_2d(net: MuNet2D, ds: BrakeDataset, lam_concave: float = 1.0,
-                 lam_mono_p: float = 0.5) -> tuple[torch.Tensor, dict]:
+def pinn_loss_2d(net: MuNet2D, ds: BrakeDataset, lam_concave: float = 0.0,
+                 lam_mono_p: float = 0.5, lam_pin: float = 50.0
+                 ) -> tuple[torch.Tensor, dict]:
     """Loss for the factorised mu(s) * ramp(p) net.
 
-    Note the deliberate asymmetry with `pinn_loss`: the concavity prior is OFF
-    by default there and ON here, and that is not an oversight.
+    `mu(s) * ramp(p)` is under-determined -- it admits a family of (shape, scale)
+    splits that fit the residual equally well -- so something has to pin the
+    split. There are two candidates, and which one you use decides everything:
 
-    The 1D problem is well posed -- mu(s) is the only unknown, so the residual
-    determines it and any shape prior can only inject bias. The 2D
-    factorisation is under-determined: mu(s) * ramp(p) admits a family of
-    (shape, scale) splits that fit the residual equally well, so it needs
-    something to pin the split. Measured over three seeds, dropping the prior
-    here degrades mean |d_mu(s)| from ~0.055 to ~0.309 and pushes the peak to
-    the edge of the grid, while `lam_pin` alone is not enough.
+      * a CONCAVITY PRIOR on mu(s), which is a guess about curve shape, and
+      * the ANCHOR ramp(1) = 1, which is an exact identity: at full brake
+        pressure the ramp is complete, so mu_eff(s, 1) is the tyre curve itself.
 
-    So: prior off where the problem is identifiable, prior on where it is not.
+    This net shipped for a long time leaning on the first, with the anchor
+    present but weighted 0.5 -- a hundredth of the weight the same anchor
+    carries in `pinn_loss_combined`, and four times below the setting that was
+    already measured to FAIL there (sec 3c: at weight 2 the optimiser simply
+    pays the penalty instead of obeying it). Measured over three seeds:
+
+        lam_pin  concave |  mean|d_mu|  ramp err   recovered peak
+            0.5      1.0 |      0.057     0.140    0.207 / 0.170 / 0.258
+            5.0      1.0 |      0.133     0.184    all wrong
+           50.0      1.0 |      0.042     0.147    all wrong
+           50.0      0.0 |      0.010     0.069    0.133 / 0.130 / 0.131  <-
+            0.5      0.0 |      0.293     0.139    grid edge
+
+    The anchor alone, at a weight that actually binds, recovers the curve 5.7x
+    better than the prior did and finds the true peak (0.127) on every seed --
+    which the shipped configuration never did. The prior was not compensating
+    for an unidentifiable problem; it was substituting for an under-weighted
+    constraint, and it made things worse once the constraint could bind.
+
+    The bottom-left row is the one that caused the original mistake: drop the
+    prior while the anchor is still too weak to take over and the net collapses
+    to 0.293, which reads as "the prior is load-bearing" when it actually means
+    "nothing is pinning the split".
+
+    So the rule from `pinn_loss` holds here after all, with no exception:
+    prior off, exact physics on. Every net in this repo now runs shape-prior
+    free; only anchors that are true by construction remain.
     """
     p_def = DEFAULTS
     s = torch.tensor(ds.s, dtype=torch.float32)
@@ -391,11 +415,14 @@ def pinn_loss_2d(net: MuNet2D, ds: BrakeDataset, lam_concave: float = 1.0,
     dr_dp = torch.autograd.grad(r_grid.sum(), p_grid, create_graph=True)[0]
     loss_mono = torch.mean(torch.relu(-dr_dp) ** 2)
 
-    # Identifiability: pin ramp(1) ~ 1 so the factorisation isn't a free scale.
+    # Identifiability: pin ramp(1) = 1 so the factorisation isn't a free scale.
+    # This is an exact identity, not a preference -- at full brake pressure the
+    # ramp is complete by definition -- so it is weighted to bind (see the
+    # docstring for what happens at 0.5 and 5).
     loss_pin = (net.ramp(torch.tensor([1.0])) - 1.0).pow(2).mean()
 
     total = (loss_data + lam_concave * loss_concave
-             + lam_mono_p * loss_mono + 0.5 * loss_pin)
+             + lam_mono_p * loss_mono + lam_pin * loss_pin)
     return total, {
         "data":    float(loss_data.item()),
         "concave": float(loss_concave.item()),
