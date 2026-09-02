@@ -109,6 +109,21 @@ jobs:
       - name: Benchmark smoke test
         run: make -C cpp run-bench
 
+      # The footprint claim is about the shipped headers, not the harness that
+      # links them -- adding JSON output to the benchmark once grew it 35 -> 52 KB
+      # with no change to ekf.hpp or pinn.hpp. This builds the deployable
+      # translation unit and asserts it links no allocator.
+      - name: Deployable footprint links no allocator
+        run: |
+          make -C cpp footprint
+          if nm -u cpp/build/footprint | grep -qE '_Znw|_Zna|malloc|calloc|realloc'; then
+            echo "::error::the shipped code now links an allocator"
+            nm -u cpp/build/footprint
+            exit 1
+          fi
+          echo "undefined symbols in the deployable binary:"
+          nm -u cpp/build/footprint
+
   # End-to-end: every figure and number in the README regenerates from seeded
   # inputs. This is a smoke test, not an assertion -- reproduce.py prints and
   # plots but does not check anything, which is why `regression-guards` above

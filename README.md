@@ -56,7 +56,7 @@ pytest                                               # 25 fast tests; add -m slo
 | Combined-slip PINN-C, worst-case cornering RMSE | **2.0 %** of $v_0$ (vs 19.9 % PINN, 19.4 % PINN-B) | [Mismatch](#4-model-mismatch-which-method-when) |
 | Brake-aware PINN-B, worst-case brake-ramp RMSE | **3.1 %** of $v_0$ (vs 16.9 % EKF, 17.8 % PINN, 21.3 % MLP) | [Mismatch](#4-model-mismatch-which-method-when) |
 | C++ EKF latency | **7 ns** median, 9 ns p99 (Apple M-series) | [C++ port](#6-c-edge-port) |
-| C++ binary, deps, allocations | 35 KB, **0** external deps, **0** runtime allocations | [C++ port](#6-c-edge-port) |
+| C++ binary, deps, allocations | 33 KB deployable, **0** allocator symbols, **0** external deps | [C++ port](#6-c-edge-port) |
 | Numerical parity (Py ↔ C++) | $7.4 \times 10^{-9}$ EKF, $1.9 \times 10^{-7}$ PINN | [C++ port](#6-c-edge-port) |
 
 ---
@@ -344,12 +344,16 @@ Which matters less than it sounds, because **latency was never the constraint he
 
 | | Python | C++ (stripped, arm64) |
 |---|---|---|
-| Binary / interpreter footprint | ~60 MB (CPython + NumPy + PyTorch) | **35 KB** (bench) / 55 KB (parity) |
+| Deployable binary | ~60 MB (CPython + NumPy + PyTorch) | **33 KB**, of which 16 KB is `__TEXT` |
 | Runtime allocations per EKF step | 7 (small NumPy temporaries) | **0** |
 | Heap touched by PINN inference | grows with autograd graph | **512 bytes** of stack (fp64) |
-| External deps at run time | NumPy, SciPy, PyTorch | **none** |
+| Undefined symbols in the shipped code | — | **`exp`, `tanh`, stack guard.** That is the whole list |
 
-The x86_64 MSYS2 build measures 62 KB / 80 KB; binary size is toolchain- and platform-dependent, so both are recorded.
+**What is being measured, and why it changed.** This row used to report the *benchmark* binary at 35 KB. That was the wrong thing to measure and it proved it: adding JSON output to the benchmark grew it to 52 KB without a single byte changing in `ekf.hpp` or `pinn.hpp`. `bench` and `parity` both link `std::vector`, `<chrono>`, `<fstream>` and a JSON writer that no embedded target would ever flash.
+
+So `cpp/src/footprint.cc` now exists to measure the deployable surface and nothing else — the EKF step, the PINN forward pass, and the baked-in weights — via `make -C cpp footprint`. It comes out at 33 KB stripped, and its **entire** external dependency is `exp`, `tanh` and the stack-protector symbols. There is no allocator symbol in it at all, which is a stronger statement of the zero-allocation claim than the old one: not *"the `operator new` you would find is only the harness's"*, but *"the shipped code cannot allocate, because it never links anything that can."*
+
+Binary size stays toolchain- and platform-dependent; the x86_64 MSYS2 build measures 62 KB / 80 KB for bench / parity.
 
 ### 6c. Numerical parity
 
@@ -561,7 +565,7 @@ src/
 ├── ml/             # FrictionNet + MuNet/MuNet2D/PacejkaNet/MuNetCombined
 ├── scenarios/      # adversarial + mismatch sweep
 └── visualization/  # plotting
-cpp/                # header-only allocation-free C++17 port
+cpp/                # header-only allocation-free C++17 port (+ a footprint target)
 tools/              # benchmark + parity + weight-export scripts
 tests/              # pytest suite (25 fast, 4 slow — CI runs both)
 data/               # sample telemetry CSV

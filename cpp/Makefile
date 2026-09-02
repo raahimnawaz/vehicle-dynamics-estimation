@@ -5,6 +5,8 @@
 #   make parity     -> just the parity checker
 #   make run-bench  -> build and run the benchmark
 #   make bench-json -> run it and archive the result under ../benchmarks/
+#   make footprint  -> minimal binary linking only the shipped headers
+#   make size       -> stripped sizes of all three
 #   make clean      -> remove build/
 #
 # To cross-compile for Jetson (aarch64-linux-gnu):
@@ -24,6 +26,7 @@ export TEMP    := $(CURDIR)/$(BUILD_DIR)/tmp
 
 PARITY := $(BUILD_DIR)/parity$(TARGET_SUFFIX)
 BENCH  := $(BUILD_DIR)/bench$(TARGET_SUFFIX)
+FOOT   := $(BUILD_DIR)/footprint$(TARGET_SUFFIX)
 
 # Benchmark settings. BENCH_BATCH must stay well above 1: a single EKF step is
 # shorter than steady_clock's tick, so at batch=1 the reported median measures
@@ -38,12 +41,13 @@ UNAME_S := $(shell uname -s)
 HOST_TAG ?= $(UNAME_M)-$(shell echo $(UNAME_S) | tr 'A-Z' 'a-z' | sed 's/darwin/macos/')
 BENCH_JSON ?= ../benchmarks/$(HOST_TAG)-cpp.json
 
-.PHONY: all parity bench clean run-bench bench-json size
+.PHONY: all parity bench footprint clean run-bench bench-json size
 
-all: parity bench
+all: parity bench footprint
 
-parity: $(PARITY)
-bench:  $(BENCH)
+parity:    $(PARITY)
+bench:     $(BENCH)
+footprint: $(FOOT)
 
 $(PARITY): src/parity.cc include/vd/ekf.hpp include/vd/matrix.hpp include/vd/pinn.hpp include/vd/pinn_weights.h
 	@mkdir -p $(BUILD_DIR)/tmp
@@ -52,6 +56,14 @@ $(PARITY): src/parity.cc include/vd/ekf.hpp include/vd/matrix.hpp include/vd/pin
 $(BENCH): src/bench.cc include/vd/ekf.hpp include/vd/matrix.hpp include/vd/pinn.hpp include/vd/pinn_weights.h
 	@mkdir -p $(BUILD_DIR)/tmp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -DVD_BENCH_FLAGS='"$(CXXFLAGS)"' -o $@ src/bench.cc
+
+# The deployable surface, measured honestly: a translation unit that links the
+# shipped headers and nothing else. `bench` and `parity` drag in std::vector,
+# <chrono>, <fstream> and a JSON writer that no embedded target would flash, so
+# their sizes overstate the footprint and drift when the harness changes.
+$(FOOT): src/footprint.cc include/vd/ekf.hpp include/vd/matrix.hpp include/vd/pinn.hpp include/vd/pinn_weights.h
+	@mkdir -p $(BUILD_DIR)/tmp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -o $@ src/footprint.cc
 
 run-bench: $(BENCH)
 	@$(BENCH) $(BENCH_ITERS) $(BENCH_BATCH)
@@ -62,9 +74,9 @@ bench-json: $(BENCH)
 	@mkdir -p $(dir $(BENCH_JSON))
 	@$(BENCH) $(BENCH_ITERS) $(BENCH_BATCH) --json $(BENCH_JSON)
 
-size: $(PARITY) $(BENCH)
-	@echo "Binary sizes (stripped):"
-	@for f in $(PARITY) $(BENCH); do \
+size: $(PARITY) $(BENCH) $(FOOT)
+	@echo "Binary sizes (stripped) -- footprint is the deployable one:"
+	@for f in $(FOOT) $(BENCH) $(PARITY); do \
 		cp $$f $$f.stripped && strip $$f.stripped && \
 		ls -l $$f.stripped | awk '{ printf "  %-40s %s bytes\n", $$NF, $$5 }'; \
 	done
