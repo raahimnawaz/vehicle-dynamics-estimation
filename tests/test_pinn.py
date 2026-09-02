@@ -116,3 +116,38 @@ def test_combined_dataset_meets_the_identifiability_conditions():
         f"data never gets closer to straight-line than n = {meta['n_range'][0]:.3f}, "
         "so the ellipse(0) = 1 anchor has no samples to bind against"
     )
+
+
+def test_pacejka_defaults_match_the_ground_truth_set():
+    """Calling the Pacejka helpers bare must give the curve the truth uses.
+
+    These carried `E = 0.97` in their signatures while PACEJKA_DRY -- the set
+    every dataset and every published figure is generated from -- specifies
+    0.5. Nothing shipped was wrong, because every call site passes
+    `**PACEJKA_DRY` explicitly, but a caller who omitted the keyword got a
+    curve peaking at s = 0.180 against the true 0.127: a 42% error in the
+    quantity an ABS controller exists to track, and up to 0.133 in mu, ten
+    times the headline recovery error of 0.013.
+
+    This is the same defect class as the 75x drag inconsistency (C1) -- one
+    physical constant with two values in the codebase -- so it gets the same
+    treatment: a single source, and a test that fails if a second copy appears.
+    """
+    from src.physics.wheel import PACEJKA_DRY, mu_combined, mu_pacejka, pacejka_peak
+
+    s = np.linspace(0.0, 0.35, 701)
+    assert np.array_equal(mu_pacejka(s), mu_pacejka(s, **PACEJKA_DRY)), (
+        "mu_pacejka's keyword defaults have drifted from PACEJKA_DRY"
+    )
+    assert pacejka_peak() == pacejka_peak(**PACEJKA_DRY), (
+        "pacejka_peak's keyword defaults have drifted from PACEJKA_DRY"
+    )
+    n = np.linspace(0.0, 0.8, 701)
+    assert np.array_equal(mu_combined(s, n), mu_combined(s, n, **PACEJKA_DRY)), (
+        "mu_combined's keyword defaults have drifted from PACEJKA_DRY"
+    )
+
+    # And the peak really is where the README says it is, from the bare call.
+    s_peak, mu_peak = pacejka_peak()
+    assert abs(s_peak - 0.127) < 1e-3, f"peak slip moved to {s_peak}"
+    assert abs(mu_peak - 0.900) < 1e-3, f"peak mu moved to {mu_peak}"

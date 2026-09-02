@@ -357,7 +357,7 @@ The C++ port is *not* hardware-accelerated (no SIMD intrinsics, no fp16/int8, no
 
 ## Corrections
 
-An audit in August 2026 found three defects in the results (C1-C3) and one test that held the first of them in place (C4). All are fixed; each has a dedicated commit with the full analysis. They are documented here rather than quietly patched, because two of the three were invisible in the outputs and the third was actively protected by a passing test.
+An audit in August 2026 found three defects in the results (C1-C3) and one test that held the first of them in place (C4). A second pass in September 2026 found two latent traps that had not yet fired (C5), and that the tooling written to prevent C1 and C2 from recurring was not actually wired into CI — see [Reproducibility](#reproducibility) for what runs now. All are fixed; each has a dedicated commit with the full analysis. They are documented here rather than quietly patched, because two of the first three were invisible in the outputs, the third was actively protected by a passing test, and the last two had no symptom at all.
 
 ### C1 — A 75× drag-coefficient inconsistency between the two forward models
 
@@ -398,6 +398,47 @@ Covered in full in [§3a](#3a-function-free-pinn-munet). Three successive priors
 `test_sweep_qualitative_ranking` asserted `means["NN (FrictionNet)"] > 0.10` — it *required* the MLP's mean error to exceed 10 %, which was only true because of C1. CI was green precisely because the bug was present, and correcting the physics turned the suite red.
 
 A test written by reading off current behaviour pins that behaviour whether or not it is correct. The replacement asserts a physical invariant instead: `test_no_method_is_broken_at_nominal` requires every estimator to be under 5 % RMSE when no effect is active, and would have failed on the original code from the first run.
+
+### C5 — Two latent traps, found by audit, closed before either fired
+
+Neither of these ever produced a wrong published number. Both are recorded because they are the
+same defect class as C1 — one quantity with two definitions — and because the reason they were
+harmless was luck about which code paths happened to be exercised, not design.
+
+**A 4th-order integrator running at 1st order on any time-varying μ.** `src/solvers/rk4.py` is an
+*autonomous* helper: it samples the right-hand side once, at the step start. Its docstring says so
+and names the correct alternative. `run_sim.simulate` accepted a callable `mu(t)` and handed it to
+that helper anyway, and `scenarios/runner.py` passes exactly such a callable. Sampling a
+time-varying input once per step is Euler's approximation *of that input*, so the whole scheme
+collapses to 1st order regardless of how many stages it has — measured at 2.00× error reduction
+per halving of `dt` where RK4 gives 16×, a factor of 2.2 × 10⁷ at `dt = 0.01`.
+
+It never mattered because every schedule this repo ships is piecewise constant in time — the
+dry→wet transition of §5 is a step, and a step is autonomous on each side of the jump. The
+measured discrepancy on that scenario was 7.4 × 10⁻³ m/s against 0.25 m/s of sensor noise, and
+all three §5 figures are byte-identical before and after the fix. The trap was set for whoever
+next wrote a *realistic* μ(t), which is the obvious next thing to write.
+
+**A tire model whose defaults were a different tire.** `mu_pacejka`, `pacejka_peak` and
+`mu_combined` carried `E = 0.97` in their signatures while `PACEJKA_DRY` — the set every dataset
+and every figure is generated from — specifies `E = 0.5`. Calling any of them without keywords
+returned a curve peaking at $s = 0.180$ against the true $0.127$: **42 % wrong in the one quantity
+an ABS controller exists to track**, and differing by up to 0.133 in μ where the headline recovery
+error is 0.013. Every call site in the repo passes `**PACEJKA_DRY` explicitly, which is the only
+reason nothing was affected.
+
+Both now have the treatment C1 got. There is one definition of the Pacejka set and the defaults
+are read from it; `run_sim.simulate` samples μ at each RK4 sub-step. And both have a test that
+fails if the defect returns — `test_simulate_is_fourth_order_in_a_time_varying_mu` (verified
+against the reintroduced bug: observed order 1.0027) and
+`test_pacejka_defaults_match_the_ground_truth_set`. A third,
+`test_simulate_scalar_mu_is_unchanged_by_substep_sampling`, pins the constant-μ path bit-for-bit
+so the integrator fix cannot quietly move §1, §2 or §4.
+
+**The general point, which is why this section exists at all.** C1 and C2 were caught by their
+symptoms — a number that was wrong in a way somebody eventually read correctly. These two had no
+symptom. They were found by reading the code against its own documentation and asking what would
+happen to the *next* caller, and that is the only method that finds this class at all.
 
 ---
 

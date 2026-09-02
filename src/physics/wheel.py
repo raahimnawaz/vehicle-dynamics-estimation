@@ -60,6 +60,19 @@ K_DRAG = DEFAULTS["k"] / DEFAULTS["m"]
 PACEJKA_DRY = {"B": 10.0, "C": 1.9, "D": 0.9,  "E": 0.5}
 PACEJKA_WET = {"B": 12.0, "C": 2.0, "D": 0.55, "E": 0.6}
 
+# The keyword defaults of `mu_pacejka`, `pacejka_peak` and `mu_combined` below
+# are taken from PACEJKA_DRY rather than written out again, for the same reason
+# K_DRAG exists: a second copy of a physical constant is a second chance to get
+# it wrong. They previously read `E = 0.97` against PACEJKA_DRY's 0.5, so any
+# caller who omitted the keyword silently got a different tire than the one the
+# ground truth is generated from -- a curve whose peak sits at s = 0.180 instead
+# of 0.127, off by 42% in the one quantity this repo is about, and differing by
+# up to 0.133 in mu where the headline recovery error is 0.013. Every call site
+# passed `**PACEJKA_DRY` explicitly, so nothing published was ever wrong; the
+# defaults were a loaded gun pointed at the next caller.
+# `tests/test_pinn.py::test_pacejka_defaults_match_the_ground_truth_set` fails
+# if these ever drift apart again.
+
 
 def mu_exponential(s, mu_max: float = 0.9, C: float = 20.0):
     """Simple saturating tire model: mu(s) = mu_max * (1 - e^{-C s}).
@@ -71,7 +84,8 @@ def mu_exponential(s, mu_max: float = 0.9, C: float = 20.0):
     return mu_max * (1.0 - np.exp(-C * np.clip(s, 0.0, None)))
 
 
-def mu_pacejka(s, B: float = 10.0, C: float = 1.9, D: float = 0.9, E: float = 0.97):
+def mu_pacejka(s, B: float = PACEJKA_DRY["B"], C: float = PACEJKA_DRY["C"],
+               D: float = PACEJKA_DRY["D"], E: float = PACEJKA_DRY["E"]):
     """Pacejka 'Magic Formula' for longitudinal friction coefficient.
 
         mu(s) = D * sin( C * arctan( B s - E (B s - arctan(B s)) ) )
@@ -79,6 +93,9 @@ def mu_pacejka(s, B: float = 10.0, C: float = 1.9, D: float = 0.9, E: float = 0.
     The curve rises steeply, peaks near s ~ 0.10-0.15, then *falls* back
     toward the sliding-friction value -- the qualitative behaviour real ABS
     controllers exploit.
+
+    Defaults are PACEJKA_DRY, so `mu_pacejka(s)` and `mu_pacejka(s,
+    **PACEJKA_DRY)` are the same curve. See the note above PACEJKA_DRY.
     """
     s = np.asarray(s, dtype=float)
     Bs = B * np.clip(s, 0.0, None)
@@ -86,7 +103,8 @@ def mu_pacejka(s, B: float = 10.0, C: float = 1.9, D: float = 0.9, E: float = 0.
     return D * np.sin(C * np.arctan(inner))
 
 
-def pacejka_peak(B: float = 10.0, C: float = 1.9, D: float = 0.9, E: float = 0.97
+def pacejka_peak(B: float = PACEJKA_DRY["B"], C: float = PACEJKA_DRY["C"],
+                 D: float = PACEJKA_DRY["D"], E: float = PACEJKA_DRY["E"]
                  ) -> tuple[float, float]:
     """Return `(s_peak, mu_peak)` for a Pacejka curve, by dense sampling."""
     s = np.linspace(0.0, 0.4, 4001)
@@ -196,8 +214,8 @@ def friction_ellipse(n_lat):
     return np.sqrt(np.clip(1.0 - n * n, 0.0, None))
 
 
-def mu_combined(s, n_lat, B: float = 10.0, C: float = 1.9, D: float = 0.9,
-                E: float = 0.97):
+def mu_combined(s, n_lat, B: float = PACEJKA_DRY["B"], C: float = PACEJKA_DRY["C"],
+                D: float = PACEJKA_DRY["D"], E: float = PACEJKA_DRY["E"]):
     """Longitudinal friction under combined slip: mu(s) * sqrt(1 - n^2).
 
     The factorisation is the whole point for the 2D PINN in `src/ml/pinn.py`:
