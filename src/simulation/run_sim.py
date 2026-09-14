@@ -26,8 +26,12 @@ _time_varying_mu` now fails if it is re-set.
 import numpy as np
 from src.physics.model import dvdt
 
+# Hard velocity ceiling for the roll-out [m/s]. 100 m/s = 360 km/h is above any
+# passenger-car braking event; it only guards against a divergent integrator.
+V_MAX = 100.0
 
-def simulate(theta, v0, t, dt, m=1500, g=9.81):
+
+def simulate(theta, v0, t, dt, g=9.81):
     """Forward roll-out of the longitudinal braking model.
 
     `theta` is `(mu, k)`. `mu` may be:
@@ -49,7 +53,9 @@ def simulate(theta, v0, t, dt, m=1500, g=9.81):
         mu_seq = np.asarray(mu_arg, dtype=float)
         if len(mu_seq) != len(t):
             raise ValueError("mu array must match len(t)")
-        mu_at = lambda ti, _seq=mu_seq, _t=t: _seq[min(int(round((ti - _t[0]) / (_t[1] - _t[0]))), len(_seq) - 1)]
+        # Clamp the index to [0, len-1]: sub-step samples at ti+dt can round past
+        # the end, and a stray ti < t0 must not wrap to a negative index (D-10).
+        mu_at = lambda ti, _seq=mu_seq, _t=t: _seq[min(max(int(round((ti - _t[0]) / (_t[1] - _t[0]))), 0), len(_seq) - 1)]
 
     v = v0
     out = []
@@ -58,11 +64,11 @@ def simulate(theta, v0, t, dt, m=1500, g=9.81):
         mu_a = mu_at(ti)
         mu_b = mu_at(ti + 0.5 * dt)
         mu_c = mu_at(ti + dt)
-        k1 = dvdt(v, m, mu_a, g, k)
-        k2 = dvdt(v + 0.5 * dt * k1, m, mu_b, g, k)
-        k3 = dvdt(v + 0.5 * dt * k2, m, mu_b, g, k)
-        k4 = dvdt(v + dt * k3, m, mu_c, g, k)
+        k1 = dvdt(v, mu_a, g, k)
+        k2 = dvdt(v + 0.5 * dt * k1, mu_b, g, k)
+        k3 = dvdt(v + 0.5 * dt * k2, mu_b, g, k)
+        k4 = dvdt(v + dt * k3, mu_c, g, k)
         v = v + (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
-        v = max(min(v, 100), 0)
+        v = max(min(v, V_MAX), 0.0)
 
     return np.array(out)

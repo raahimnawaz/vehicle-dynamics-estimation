@@ -14,6 +14,21 @@ from src.physics.wheel import (
 )
 
 
+def test_smooth_does_not_bias_the_endpoints():
+    """Edge-padded smoothing must keep the endpoints on the signal (D-02).
+
+    The old zero-padded `convolve(mode="same")` dragged v_s[0] to ~0.55*v0 and
+    spiked its dv/dt to ~330 m/s^2; those samples were only kept out of training
+    incidentally by the |dv/dt| < 12 mask.
+    """
+    from src.ml.pinn import _smooth
+
+    assert np.allclose(_smooth(np.full(100, 30.0), 9), 30.0, atol=1e-9)
+    ramp = np.linspace(30.0, 10.0, 100)
+    rs = _smooth(ramp, 9)
+    assert abs(rs[0] - 30.0) < 0.5 and abs(rs[-1] - 10.0) < 0.5
+
+
 def test_mu_exponential_saturates():
     s = np.array([0.0, 0.05, 0.15, 0.3])
     mu = mu_exponential(s, mu_max=0.9, C=20.0)
@@ -55,7 +70,9 @@ def test_munet_recovers_pacejka_shape():
     lo, hi = meta["s_range"]
     mask = (s >= lo + 1e-3) & (s <= hi - 1e-3)
     err = np.abs(mu_hat[mask] - mu_true[mask])
-    assert err.mean() < 0.10, f"mean err {err.mean():.3f} too large"
+    # Pinned near the README's headline 0.013 (measured 0.0126 at this config),
+    # not the old 0.10 that let the claim silently degrade 7x (D-05).
+    assert err.mean() < 0.03, f"mean err {err.mean():.3f} too large"
     # The recovered curve has a peak somewhere in the data range.
     i_peak = int(np.argmax(mu_hat))
     assert 0.05 < s[i_peak] < 0.3

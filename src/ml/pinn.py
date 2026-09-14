@@ -141,8 +141,22 @@ class MuNet2D(nn.Module):
 
 
 def _smooth(arr: np.ndarray, w: int = 7) -> np.ndarray:
+    """Centred moving average with EDGE padding, not zero padding.
+
+    `np.convolve(mode="same")` pads with zeros, which drags the first/last w//2
+    samples of a braking trace toward 0 -- e.g. v_s[0] fell to ~0.55*v0 and its
+    finite-difference dv/dt spiked to ~330 m/s^2. Those corrupted boundary
+    samples were only kept out of the training set incidentally, by the
+    |dv/dt| < 12 mask downstream; a gentler schedule or a looser mask would let
+    them through. Edge padding keeps the endpoints on the signal so the guard is
+    no longer load-bearing. (Formal-inspection defect D-02.)
+    """
+    arr = np.asarray(arr, dtype=float)
+    if w <= 1:
+        return arr
     kernel = np.ones(w) / w
-    return np.convolve(arr, kernel, mode="same")
+    padded = np.pad(arr, (w // 2, (w - 1) // 2), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
 
 
 def generate_dataset(

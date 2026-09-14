@@ -67,7 +67,7 @@ def run_synthetic(seed: int = 0) -> dict:
     t = np.arange(0, 10, dt)
 
     v_true = simulate([true_mu, true_k], v0, t, dt)
-    v_obs = add_noise(v_true)
+    v_obs = add_noise(v_true, rng=np.random.default_rng(seed))
 
     mu_est, k_est = estimate(v_obs, v0, t, dt)
     v_fit = simulate([mu_est, k_est], v0, t, dt)

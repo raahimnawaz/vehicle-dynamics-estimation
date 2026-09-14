@@ -125,7 +125,7 @@ def test_simulate_scalar_mu_is_unchanged_by_substep_sampling():
     v, expected = v0, []
     for _ in t:
         expected.append(v)
-        v = rk4_step(dvdt, v, dt, 1500, 0.7, 9.81, K_DRAG)
+        v = rk4_step(dvdt, v, dt, 0.7, 9.81, K_DRAG)
         v = max(min(v, 100), 0)
 
     assert np.array_equal(v_new, np.array(expected)), "scalar-mu path drifted"

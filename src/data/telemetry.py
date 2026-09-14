@@ -4,8 +4,8 @@ Accepts CSVs with columns (time, speed) in (seconds, m/s). This is the format
 produced by most OBD-II loggers (after one-line conversion from km/h) and by
 the comma2k19 dataset when its `CAN/value` traces are resampled.
 
-The braking segment is extracted automatically: contiguous samples where
-speed is monotonically non-increasing and bracketed by a deceleration > 0.5 m/s^2.
+The braking segment is extracted automatically as the longest contiguous run of
+samples whose (smoothed) deceleration exceeds `min_decel` (default 0.5 m/s^2).
 """
 
 from __future__ import annotations
@@ -38,8 +38,13 @@ def extract_braking_event(t: np.ndarray, v: np.ndarray, min_decel: float = 0.5,
     so that GPS quantisation noise doesn't fragment the detected segment.
     """
     if smooth_window > 1:
-        kernel = np.ones(smooth_window) / smooth_window
-        v_smooth = np.convolve(v, kernel, mode="same")
+        # Edge-padded centred average: zero-padded "same" convolution biases the
+        # ends toward 0 and can spuriously start/end the detected segment at the
+        # trace boundary (formal-inspection defect D-02).
+        w = smooth_window
+        kernel = np.ones(w) / w
+        v_smooth = np.convolve(np.pad(v, (w // 2, (w - 1) // 2), mode="edge"),
+                               kernel, mode="valid")
     else:
         v_smooth = v
     dt = np.diff(t)
