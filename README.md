@@ -6,6 +6,8 @@
 
 A reproducible benchmark for vehicle-dynamics system identification: first-principles longitudinal braking dynamics, explicit ODE solvers, five estimators on the same data (batch optimiser, EKF, MLP, two physics-informed networks), an honest model-mismatch study, and an allocation-free C++ edge port that matches the Python reference to $10^{-9}$.
 
+> **Next:** this becomes part of **Parc fermé**, an F1 telemetry and simulation platform in progress, together with [engine-map-pinn](https://github.com/raahimnawaz/engine-map-pinn) and [apex-forecast](https://github.com/raahimnawaz/apex-forecast).
+
 `python reproduce.py --all` regenerates every figure and number in this README from seeded inputs. [Corrections](#corrections) lists the audits that moved several of them.
 
 ![Recovering the tire curve from noisy braking data](results/pinn_recovery.png)
